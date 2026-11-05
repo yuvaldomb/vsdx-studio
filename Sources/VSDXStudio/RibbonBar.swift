@@ -1,446 +1,850 @@
 import AppKit
 
+// diagrams.net classic chrome (geEditor geClassic): menu row plus icon toolbar.
+private enum DiagramBarColor {
+    static let bar = color("#f1f3f4")
+    static let ink = color("#3f3f3f")
+    static let hover = color("#e2e2e2")
+    static let orange = color("#f08705")
+    static let statusText = color("#b62623")
+    static let statusFill = color("#eacccc")
+    static let share = color("#c2e7ff")
+    static let hairline = color("#dadada")
+    static let separator = color("#e5e5e5")
+    static let fillSwatch = color("#dae8fc")
+    static let lineSwatch = color("#6c8ebf")
+
+    private static func color(_ hex: String) -> NSColor {
+        NSColor(hex: hex) ?? .black
+    }
+}
+
 final class RibbonBar: NSView {
-    private let tabRow = NSStackView()
-    private let contentHost = NSView()
-    private var tabButtons: [NSButton] = []
-    private var pages: [NSView] = []
-    private var toolButtons: [EditorTool: CommandButton] = [:]
-    private var selectedTab = 0
+    var onShapes: (() -> Void)?
+    var onFormat: (() -> Void)?
+    var onCollapse: (() -> Void)?
+
+    private let titleLabel = NSTextField(labelWithString: "Untitled Diagram")
+    private let statusPill = StatusPill()
+    private let zoomButton = ChromeButton(kind: .zoom)
+    private var actionTarget: AnyObject?
+    private var didInstall = false
+    private var highlightButtons: [EditorTool: ChromeButton] = [:]
+    private var menus: [ObjectIdentifier: NSMenu] = [:]
+    private var fillColor = DiagramBarColor.fillSwatch
+    private var lineColor = DiagramBarColor.lineSwatch
+    private weak var colorSender: NSButton?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.white.cgColor
-
-        tabRow.orientation = .horizontal
-        tabRow.alignment = .centerY
-        tabRow.spacing = 2
-        tabRow.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 12)
-        tabRow.translatesAutoresizingMaskIntoConstraints = false
-        tabRow.setContentHuggingPriority(.required, for: .horizontal)
-
-        let tabSpacer = NSView()
-        tabSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        contentHost.translatesAutoresizingMaskIntoConstraints = false
-        let line = NSBox()
-        line.boxType = .separator
-        line.translatesAutoresizingMaskIntoConstraints = false
-
-        addSubview(tabRow)
-        addSubview(line)
-        addSubview(contentHost)
-        NSLayoutConstraint.activate([
-            tabRow.leadingAnchor.constraint(equalTo: leadingAnchor),
-            tabRow.trailingAnchor.constraint(equalTo: trailingAnchor),
-            tabRow.topAnchor.constraint(equalTo: topAnchor),
-            tabRow.heightAnchor.constraint(equalToConstant: 34),
-            line.leadingAnchor.constraint(equalTo: leadingAnchor),
-            line.trailingAnchor.constraint(equalTo: trailingAnchor),
-            line.topAnchor.constraint(equalTo: tabRow.bottomAnchor),
-            contentHost.leadingAnchor.constraint(equalTo: leadingAnchor),
-            contentHost.trailingAnchor.constraint(equalTo: trailingAnchor),
-            contentHost.topAnchor.constraint(equalTo: line.bottomAnchor),
-            contentHost.bottomAnchor.constraint(equalTo: bottomAnchor)
-        ])
-        _ = tabSpacer
+        layer?.backgroundColor = DiagramBarColor.bar.cgColor
+        titleLabel.font = NSFont.systemFont(ofSize: 18)
+        titleLabel.textColor = DiagramBarColor.ink
+        titleLabel.maximumNumberOfLines = 1
+        titleLabel.cell?.lineBreakMode = .byTruncatingTail
+        titleLabel.cell?.truncatesLastVisibleLine = true
+        titleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(700), for: .horizontal)
+        titleLabel.setContentHuggingPriority(.required, for: .horizontal)
+        titleLabel.translatesAutoresizingMaskIntoConstraints = false
+        zoomButton.setLabel("100%", size: 14, weight: .regular, monospaced: true)
+        zoomButton.toolTip = "Zoom"
+        zoomButton.widthAnchor.constraint(equalToConstant: 62).isActive = true
+        zoomButton.heightAnchor.constraint(equalToConstant: 28).isActive = true
     }
 
     required init?(coder: NSCoder) { nil }
 
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: 98)
+    }
+
     func install(target: AnyObject) {
-        let titles = ["Home", "Insert", "Design", "View"]
-        let built = [home(target), insert(target), design(target), viewTab(target)]
-        for (index, title) in titles.enumerated() {
-            let button = NSButton(title: title, target: self, action: #selector(selectTab(_:)))
-            button.tag = index
-            button.bezelStyle = .recessed
-            button.setButtonType(.momentaryChange)
-            button.isBordered = false
-            button.font = NSFont.systemFont(ofSize: 13, weight: .medium)
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(greaterThanOrEqualToConstant: 72).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 28).isActive = true
-            tabButtons.append(button)
-            tabRow.addArrangedSubview(button)
-            pages.append(scrollable(built[index]))
-        }
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        tabRow.addArrangedSubview(spacer)
-        showTab(0)
-    }
+        actionTarget = target
+        guard !didInstall else { return }
+        didInstall = true
 
-    override func layout() {
-        super.layout()
-        if let scroll = contentHost.subviews.first as? NSScrollView {
-            scroll.frame = contentHost.bounds
-        }
-        positionGroups()
-    }
+        let menuRow = barRow()
+        let toolRow = barRow()
+        addSubview(menuRow)
+        addSubview(toolRow)
+        NSLayoutConstraint.activate([
+            menuRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            menuRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            menuRow.topAnchor.constraint(equalTo: topAnchor),
+            menuRow.heightAnchor.constraint(equalToConstant: 60),
+            toolRow.leadingAnchor.constraint(equalTo: leadingAnchor),
+            toolRow.trailingAnchor.constraint(equalTo: trailingAnchor),
+            toolRow.topAnchor.constraint(equalTo: menuRow.bottomAnchor),
+            toolRow.heightAnchor.constraint(equalToConstant: 38)
+        ])
 
-    private func positionGroups() {
-        guard let scroll = contentHost.subviews.first as? NSScrollView,
-              let document = scroll.documentView else { return }
-        let height = max(scroll.bounds.height, contentHost.bounds.height, 80)
-        var x: CGFloat = 8
-        for group in document.subviews {
-            let width = (group as? RibbonGroup)?.preferredWidth ?? 44
-            group.frame = NSRect(x: x, y: 4, width: width, height: max(72, height - 8))
-            x += width
-        }
-        document.frame = NSRect(x: 0, y: 0, width: max(x + 8, scroll.bounds.width), height: height)
+        let mark = AppMark()
+        let brand = horizontalStack([mark, titleLabel], spacing: 8)
+        brand.setContentHuggingPriority(.required, for: .horizontal)
+        let menuCluster = horizontalStack(menuButtons(), spacing: 2)
+        menuCluster.setContentHuggingPriority(.required, for: .horizontal)
+        menuCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let cluster = horizontalStack([brand, menuCluster, statusPill], spacing: 12)
+        cluster.setContentHuggingPriority(.required, for: .horizontal)
+        cluster.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(750), for: .horizontal)
+
+        let share = ChromeButton(kind: .share)
+        share.setLabel("Share", size: 14, weight: .semibold)
+        share.toolTip = "Share"
+        share.isEnabled = false
+        share.heightAnchor.constraint(equalToConstant: 32).isActive = true
+
+        let menuStack = horizontalStack([cluster, flexibleSpace(), share], spacing: 8)
+        menuStack.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 12)
+        menuStack.heightAnchor.constraint(greaterThanOrEqualToConstant: 36).isActive = true
+        center(menuStack, in: menuRow)
+
+        let tools = toolItems()
+        let toolStack = horizontalStack(tools, spacing: 2)
+        toolStack.edgeInsets = NSEdgeInsets(top: 0, left: 16, bottom: 0, right: 8)
+        toolStack.heightAnchor.constraint(equalToConstant: 28).isActive = true
+        toolStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        toolStack.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        center(toolStack, in: toolRow)
+        hairline(in: toolRow, top: true)
+        hairline(in: toolRow, top: false)
+        update(tool: .pointer)
     }
 
     func update(tool: EditorTool) {
-        for (item, button) in toolButtons {
+        for (item, button) in highlightButtons {
             button.isChosen = item == tool
         }
     }
 
-    func showTab(_ index: Int) {
-        selectedTab = index
-        contentHost.subviews.forEach { $0.removeFromSuperview() }
-        guard pages.indices.contains(index) else { return }
-        let page = pages[index]
-        page.translatesAutoresizingMaskIntoConstraints = false
-        contentHost.addSubview(page)
-        NSLayoutConstraint.activate([
-            page.leadingAnchor.constraint(equalTo: contentHost.leadingAnchor),
-            page.trailingAnchor.constraint(equalTo: contentHost.trailingAnchor),
-            page.topAnchor.constraint(equalTo: contentHost.topAnchor),
-            page.bottomAnchor.constraint(equalTo: contentHost.bottomAnchor)
-        ])
-        for (buttonIndex, button) in tabButtons.enumerated() {
-            let selected = buttonIndex == index
-            button.font = NSFont.systemFont(ofSize: 13, weight: selected ? .semibold : .regular)
-            button.contentTintColor = selected ? StudioChrome.accent : StudioChrome.title
-        }
-        layoutSubtreeIfNeeded()
-        positionGroups()
+    func showTab(_ index: Int) {}
+
+    func setDocumentTitle(_ title: String) {
+        let value = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        titleLabel.stringValue = value.isEmpty ? "Untitled Diagram" : value
+        titleLabel.invalidateIntrinsicContentSize()
+    }
+
+    func setStatus(_ text: String?) {
+        let value = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        statusPill.label.stringValue = value
+        statusPill.isHidden = value.isEmpty
+    }
+
+    func setZoomPercent(_ percent: Double) {
+        let value = percent.isFinite ? Int(percent.rounded()) : 100
+        zoomButton.setLabel("\(value)%", size: 14, weight: .regular, monospaced: true)
     }
 
     func overlappingButtons() -> [String] {
-        layoutSubtreeIfNeeded()
-        var found: [(String, NSRect)] = []
-        func walk(_ view: NSView) {
-            if view.isHidden { return }
-            if let button = view as? NSButton, button.frame.width > 4, button.frame.height > 4, button.superview is NSStackView || button.superview === tabRow {
-                let frame = button.convert(button.bounds, to: self).insetBy(dx: 1, dy: 1)
-                found.append((button.title.isEmpty ? "swatch" : button.title, frame))
-            }
-            if let button = view as? CommandButton, button.frame.width > 4 {
-                let frame = button.convert(button.bounds, to: self).insetBy(dx: 1, dy: 1)
-                found.append((button.toolTip ?? "command", frame))
-            }
-            for child in view.subviews { walk(child) }
-        }
-        walk(self)
+        let frames = buttonFrames()
         var clashes: [String] = []
-        for index in found.indices {
-            for other in (index + 1)..<found.count where found[index].1.intersects(found[other].1) {
-                let a = found[index].1
-                let b = found[other].1
-                clashes.append(String(format: "%@ (%.0f,%.0f) overlaps %@ (%.0f,%.0f)", found[index].0, a.minX, a.width, found[other].0, b.minX, b.width))
+        for index in frames.indices {
+            for other in (index + 1)..<frames.count where frames[index].1.intersects(frames[other].1) {
+                let a = frames[index]
+                let b = frames[other]
+                clashes.append(String(format: "%@ (%.0f,%.0f) overlaps %@ (%.0f,%.0f)", a.0, a.1.minX, a.1.width, b.0, b.1.minX, b.1.width))
             }
         }
         return clashes
     }
 
     func groupDebug() -> String {
-        guard let scroll = contentHost.subviews.first as? NSScrollView, let document = scroll.documentView else { return "no-scroll" }
-        return document.subviews.map { view in
-            let preferred = (view as? RibbonGroup)?.preferredWidth ?? -1
-            return String(format: "x=%.0f w=%.0f pref=%.0f subs=%d", view.frame.minX, view.frame.width, preferred, view.subviews.count)
-        }.joined(separator: " | ")
+        buttonFrames()
+            .sorted { lhs, rhs in
+                if abs(lhs.1.minY - rhs.1.minY) > 8 { return lhs.1.minY > rhs.1.minY }
+                return lhs.1.minX < rhs.1.minX
+            }
+            .map { String(format: "%@=%.0f", $0.0, $0.1.minX) }
+            .joined(separator: " | ")
     }
 
-    @objc private func selectTab(_ sender: NSButton) {
-        showTab(sender.tag)
-    }
-
-    private func scrollable(_ row: NSView) -> NSView {
-        let scroll = NSScrollView()
-        scroll.drawsBackground = false
-        scroll.hasHorizontalScroller = true
-        scroll.hasVerticalScroller = false
-        scroll.autohidesScrollers = false
-        let document = NSView()
-        for group in Array(row.subviews) {
-            group.removeFromSuperview()
-            document.addSubview(group)
+    private func buttonFrames() -> [(String, NSRect)] {
+        layoutSubtreeIfNeeded()
+        var found: [(String, NSRect)] = []
+        func walk(_ view: NSView) {
+            if view.isHidden { return }
+            if let button = view as? NSButton, button.bounds.width > 4, button.bounds.height > 4 {
+                let frame = button.convert(button.bounds, to: self).insetBy(dx: 1, dy: 1)
+                if frame.width > 1, frame.height > 1 {
+                    let tip = button.toolTip ?? ""
+                    let name = tip.isEmpty ? (button.title.isEmpty ? "button" : button.title) : tip
+                    found.append((name, frame))
+                }
+            }
+            for child in view.subviews { walk(child) }
         }
-        scroll.documentView = document
-        return scroll
+        walk(self)
+        return found
     }
 
-    private func home(_ target: AnyObject) -> NSView {
-        row([
-            group("Clipboard", [
-                command("Paste", "doc.on.clipboard", #selector(StudioWindowController.pasteShapes(_:)), target, width: 64),
-                command("Copy", "doc.on.doc", #selector(NSText.copy(_:)), target, width: 64),
-                command("Cut", "scissors", #selector(NSText.cut(_:)), target, width: 64)
-            ]),
-            group("Tools", [
-                tool(.pointer, "Select", "cursorarrow", target),
-                tool(.rectangle, "Rectangle", "rectangle", target),
-                tool(.ellipse, "Ellipse", "oval", target),
-                tool(.line, "Line", "line.diagonal", target),
-                tool(.connector, "Connector", "arrow.triangle.turn.up.right.diamond", target),
-                tool(.text, "Text", "character.textbox", target)
-            ]),
-            group("Arrange", [
-                command("Front", "square.3.layers.3d.top.filled", #selector(StudioWindowController.bringToFront(_:)), target, width: 62),
-                command("Back", "square.3.layers.3d.bottom.filled", #selector(StudioWindowController.sendToBack(_:)), target, width: 62),
-                command("Group", "rectangle.3.group", #selector(StudioWindowController.groupShapes(_:)), target, width: 62),
-                command("Ungroup", "rectangle.3.group.dashed", #selector(StudioWindowController.ungroupShapes(_:)), target, width: 70)
-            ]),
-            group("Font", [
-                icon("Bold", "bold", #selector(StudioWindowController.toggleBold(_:)), target),
-                icon("Italic", "italic", #selector(StudioWindowController.toggleItalic(_:)), target),
-                icon("Underline", "underline", #selector(StudioWindowController.toggleUnderline(_:)), target),
-                icon("Align Left", "text.alignleft", #selector(StudioWindowController.alignTextLeft(_:)), target),
-                icon("Center", "text.aligncenter", #selector(StudioWindowController.alignTextCenter(_:)), target),
-                icon("Align Right", "text.alignright", #selector(StudioWindowController.alignTextRight(_:)), target)
-            ]),
-            styleGroup(target)
+    private func barRow() -> NSView {
+        let row = NSView()
+        row.wantsLayer = true
+        row.layer?.backgroundColor = DiagramBarColor.bar.cgColor
+        row.translatesAutoresizingMaskIntoConstraints = false
+        return row
+    }
+
+    private func center(_ stack: NSStackView, in row: NSView) {
+        row.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            stack.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            stack.centerYAnchor.constraint(equalTo: row.centerYAnchor)
         ])
     }
 
-    private func insert(_ target: AnyObject) -> NSView {
-        row([
-            group("Pages", [
-                command("Blank Page", "doc.badge.plus", #selector(StudioWindowController.addPage(_:)), target, width: 92),
-                command("Duplicate", "doc.on.doc", #selector(StudioWindowController.duplicatePage(_:)), target, width: 84),
-                command("Rename", "pencil", #selector(StudioWindowController.renamePage(_:)), target, width: 76),
-                command("Delete", "trash", #selector(StudioWindowController.deletePage(_:)), target, width: 72)
-            ]),
-            group("Shapes", [
-                tool(.text, "Text Box", "character.textbox", target),
-                tool(.rectangle, "Rectangle", "rectangle", target),
-                tool(.ellipse, "Ellipse", "oval", target),
-                tool(.connector, "Connector", "arrow.triangle.turn.up.right.diamond", target)
-            ])
-        ])
+    private func hairline(in row: NSView, top: Bool) {
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = DiagramBarColor.hairline.cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        row.addSubview(line)
+        var pins = [
+            line.leadingAnchor.constraint(equalTo: row.leadingAnchor),
+            line.trailingAnchor.constraint(equalTo: row.trailingAnchor),
+            line.heightAnchor.constraint(equalToConstant: 1)
+        ]
+        pins.append(top
+            ? line.topAnchor.constraint(equalTo: row.topAnchor)
+            : line.bottomAnchor.constraint(equalTo: row.bottomAnchor))
+        NSLayoutConstraint.activate(pins)
     }
 
-    private func design(_ target: AnyObject) -> NSView {
-        let popup = NSPopUpButton()
-        popup.addItems(withTitles: ["Letter Landscape", "Letter Portrait", "Tabloid", "A4 Portrait", "A4 Landscape", "A3 Landscape"])
-        popup.target = target
-        popup.action = #selector(StudioWindowController.applyPageSize(_:))
-        popup.translatesAutoresizingMaskIntoConstraints = false
-        popup.widthAnchor.constraint(equalToConstant: 180).isActive = true
-        popup.setContentCompressionResistancePriority(.required, for: .horizontal)
-        return row([
-            group("Page Size", [popup]),
-            styleGroup(target, title: "Theme")
-        ])
-    }
-
-    private func viewTab(_ target: AnyObject) -> NSView {
-        row([
-            group("Zoom", [
-                command("Zoom In", "plus.magnifyingglass", #selector(StudioWindowController.zoomIn(_:)), target, width: 76),
-                command("Zoom Out", "minus.magnifyingglass", #selector(StudioWindowController.zoomOut(_:)), target, width: 80),
-                command("100%", "1.magnifyingglass", #selector(StudioWindowController.zoomActual(_:)), target, width: 68),
-                command("Fit Page", "arrow.up.left.and.arrow.down.right", #selector(StudioWindowController.zoomFit(_:)), target, width: 76)
-            ]),
-            group("Show", [
-                command("Grid", "grid", #selector(StudioWindowController.toggleGrid(_:)), target, width: 64),
-                command("Rulers", "ruler", #selector(StudioWindowController.toggleRulers(_:)), target, width: 68),
-                command("Snap", "scope", #selector(StudioWindowController.toggleSnap(_:)), target, width: 64),
-                command("Connect", "smallcircle.filled.circle", #selector(StudioWindowController.toggleConnections(_:)), target, width: 76)
-            ])
-        ])
-    }
-
-    private func row(_ groups: [NSView]) -> NSView {
-        let stack = NSStackView(views: groups)
+    private func horizontalStack(_ views: [NSView], spacing: CGFloat) -> NSStackView {
+        let stack = NSStackView(views: views)
         stack.orientation = .horizontal
         stack.alignment = .centerY
-        stack.spacing = 0
-        stack.setContentCompressionResistancePriority(.required, for: .horizontal)
-        stack.setContentHuggingPriority(.required, for: .horizontal)
+        stack.distribution = .gravityAreas
+        stack.spacing = spacing
+        stack.detachesHiddenViews = true
+        stack.translatesAutoresizingMaskIntoConstraints = false
         return stack
     }
 
-    private func group(_ title: String, _ controls: [NSView]) -> NSView {
-        let buttons = NSStackView(views: controls)
-        buttons.orientation = .horizontal
-        buttons.alignment = .centerY
-        buttons.spacing = 4
-        buttons.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 0, right: 10)
-        buttons.setContentCompressionResistancePriority(.required, for: .horizontal)
+    private func flexibleSpace() -> NSView {
+        let view = NSView()
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.setContentHuggingPriority(NSLayoutConstraint.Priority(rawValue: 1), for: .horizontal)
+        view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 1), for: .horizontal)
+        view.heightAnchor.constraint(equalToConstant: 20).isActive = true
+        return view
+    }
 
-        let caption = NSTextField(labelWithString: title)
-        caption.font = NSFont.systemFont(ofSize: 10)
-        caption.textColor = StudioChrome.label
-        caption.alignment = .center
-        caption.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-        let column = NSStackView(views: [buttons, caption])
-        column.orientation = .vertical
-        column.alignment = .centerX
-        column.spacing = 2
-        column.translatesAutoresizingMaskIntoConstraints = false
-
-        let wrap = RibbonGroup()
+    private func separator() -> NSView {
+        let wrap = NSView()
         wrap.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(column)
-        let separator = NSBox()
-        separator.boxType = .separator
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        wrap.addSubview(separator)
-        NSLayoutConstraint.activate([
-            column.leadingAnchor.constraint(equalTo: wrap.leadingAnchor),
-            column.topAnchor.constraint(equalTo: wrap.topAnchor),
-            column.bottomAnchor.constraint(equalTo: wrap.bottomAnchor),
-            separator.leadingAnchor.constraint(equalTo: column.trailingAnchor),
-            separator.trailingAnchor.constraint(equalTo: wrap.trailingAnchor),
-            separator.widthAnchor.constraint(equalToConstant: 1),
-            separator.topAnchor.constraint(equalTo: wrap.topAnchor, constant: 6),
-            separator.bottomAnchor.constraint(equalTo: wrap.bottomAnchor, constant: -6)
-        ])
-        wrap.setContentCompressionResistancePriority(.required, for: .horizontal)
+        wrap.widthAnchor.constraint(equalToConstant: 9).isActive = true
+        wrap.heightAnchor.constraint(equalToConstant: 20).isActive = true
         wrap.setContentHuggingPriority(.required, for: .horizontal)
-        wrap.preferredWidth = max(measuredWidth(column) + 1, 44)
+        wrap.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let line = NSView()
+        line.wantsLayer = true
+        line.layer?.backgroundColor = DiagramBarColor.separator.cgColor
+        line.translatesAutoresizingMaskIntoConstraints = false
+        wrap.addSubview(line)
+        NSLayoutConstraint.activate([
+            line.widthAnchor.constraint(equalToConstant: 1),
+            line.heightAnchor.constraint(equalToConstant: 20),
+            line.centerXAnchor.constraint(equalTo: wrap.centerXAnchor),
+            line.centerYAnchor.constraint(equalTo: wrap.centerYAnchor)
+        ])
         return wrap
     }
 
-    private func measuredWidth(_ view: NSView) -> CGFloat {
-        if let stack = view as? NSStackView {
-            if stack.orientation == .horizontal {
-                var width = stack.edgeInsets.left + stack.edgeInsets.right
-                for (index, item) in stack.arrangedSubviews.enumerated() {
-                    if index > 0 { width += stack.spacing }
-                    width += measuredWidth(item)
-                }
-                return width
-            }
-            return stack.arrangedSubviews.map(measuredWidth).max() ?? 0
-        }
-        let fixed = view.constraints.first {
-            $0.firstAttribute == .width && $0.relation == .equal && $0.secondItem == nil
-        }?.constant
-        return fixed ?? 0
+    private func menuButtons() -> [NSView] {
+        [
+            menuButton("File", fileMenu()),
+            menuButton("Edit", editMenu()),
+            menuButton("View", viewMenu()),
+            menuButton("Arrange", arrangeMenu()),
+            menuButton("Extras", extrasMenu()),
+            menuButton("Help", helpMenu())
+        ]
     }
 
-    private func styleGroup(_ target: AnyObject, title: String = "Shape Styles") -> NSView {
-        var swatches: [NSView] = []
-        for (index, style) in quickStyles.enumerated() {
-            let button = NSButton(title: "", target: target, action: #selector(StudioWindowController.applyQuickStyle(_:)))
-            button.tag = index
-            button.bezelStyle = .shadowlessSquare
-            button.isBordered = false
-            button.wantsLayer = true
-            button.layer?.backgroundColor = NSColor(hex: style.fill)?.cgColor
-            button.layer?.borderColor = NSColor(hex: style.line)?.cgColor
-            button.layer?.borderWidth = 2
-            button.layer?.cornerRadius = 3
-            button.toolTip = "Apply this color"
-            button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(equalToConstant: 22).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 18).isActive = true
-            button.setContentCompressionResistancePriority(.required, for: .horizontal)
-            swatches.append(button)
-        }
-        let top = NSStackView(views: Array(swatches.prefix(6)))
-        let bottom = NSStackView(views: Array(swatches.dropFirst(6)))
-        top.orientation = .horizontal
-        bottom.orientation = .horizontal
-        top.spacing = 4
-        bottom.spacing = 4
-        let grid = NSStackView(views: [top, bottom])
-        grid.orientation = .vertical
-        grid.spacing = 4
-        grid.alignment = .leading
-        return group(title, [grid])
-    }
-
-    private func command(_ title: String, _ symbol: String, _ action: Selector, _ target: AnyObject, width: CGFloat) -> CommandButton {
-        CommandButton(title: title, symbol: symbolImage(symbol, title), target: target, action: action, width: width)
-    }
-
-    private func icon(_ title: String, _ symbol: String, _ action: Selector, _ target: AnyObject) -> NSButton {
-        let button = NSButton(title: "", target: target, action: action)
-        button.image = symbolImage(symbol, title)
-        button.imagePosition = .imageOnly
-        button.bezelStyle = .recessed
+    private func menuButton(_ title: String, _ menu: NSMenu) -> ChromeButton {
+        let button = ChromeButton(kind: .text)
+        button.setLabel(title, size: 14, weight: .regular)
         button.toolTip = title
-        button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 34).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 32).isActive = true
-        button.setContentCompressionResistancePriority(.required, for: .horizontal)
+        button.target = self
+        button.action = #selector(showMenu(_:))
+        menus[ObjectIdentifier(button)] = menu
         return button
     }
 
-    private func tool(_ tool: EditorTool, _ title: String, _ symbol: String, _ target: AnyObject) -> CommandButton {
-        let button = command(title, symbol, #selector(StudioWindowController.chooseTool(_:)), target, width: 70)
-        button.identifier = NSUserInterfaceItemIdentifier(tool.rawValue)
-        toolButtons[tool] = button
+    private func fileMenu() -> NSMenu {
+        let menu = NSMenu(title: "File")
+        let docs = NSDocumentController.shared
+        menu.addItem(menuItem("New", #selector(NSDocumentController.newDocument(_:)), target: docs))
+        menu.addItem(menuItem("Open…", #selector(NSDocumentController.openDocument(_:)), target: docs))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Save", #selector(NSDocument.save(_:))))
+        menu.addItem(menuItem("Save As…", #selector(NSDocument.saveAs(_:))))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Export PNG…", #selector(StudioWindowController.exportPNG(_:))))
+        menu.addItem(menuItem("Export PDF…", #selector(StudioWindowController.exportPDF(_:))))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Close", #selector(NSWindow.performClose(_:))))
+        return menu
+    }
+
+    private func editMenu() -> NSMenu {
+        let menu = NSMenu(title: "Edit")
+        menu.addItem(menuItem("Undo", Selector(("undo:"))))
+        menu.addItem(menuItem("Redo", Selector(("redo:"))))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Cut", #selector(StudioWindowController.cut(_:))))
+        menu.addItem(menuItem("Copy", #selector(StudioWindowController.copy(_:))))
+        menu.addItem(menuItem("Paste", #selector(StudioWindowController.paste(_:))))
+        menu.addItem(menuItem("Delete", #selector(StudioWindowController.deleteShapes(_:))))
+        menu.addItem(menuItem("Duplicate", #selector(StudioWindowController.duplicate(_:))))
+        menu.addItem(menuItem("Select All", #selector(StudioWindowController.selectAll(_:))))
+        return menu
+    }
+
+    private func viewMenu() -> NSMenu {
+        let menu = NSMenu(title: "View")
+        menu.addItem(menuItem("Zoom In", #selector(StudioWindowController.zoomIn(_:))))
+        menu.addItem(menuItem("Zoom Out", #selector(StudioWindowController.zoomOut(_:))))
+        menu.addItem(menuItem("Actual Size", #selector(StudioWindowController.zoomActual(_:))))
+        menu.addItem(menuItem("Fit Page", #selector(StudioWindowController.zoomFit(_:))))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Grid", #selector(StudioWindowController.toggleGrid(_:))))
+        menu.addItem(menuItem("Rulers", #selector(StudioWindowController.toggleRulers(_:))))
+        menu.addItem(menuItem("Snap", #selector(StudioWindowController.toggleSnap(_:))))
+        menu.addItem(menuItem("Connection Points", #selector(StudioWindowController.toggleConnections(_:))))
+        return menu
+    }
+
+    private func arrangeMenu() -> NSMenu {
+        let menu = NSMenu(title: "Arrange")
+        menu.addItem(menuItem("To Front", resolved("orderFront:", fallback: #selector(StudioWindowController.bringToFront(_:)))))
+        menu.addItem(menuItem("To Back", resolved("orderBack:", fallback: #selector(StudioWindowController.sendToBack(_:)))))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Group", #selector(StudioWindowController.groupShapes(_:))))
+        menu.addItem(menuItem("Ungroup", #selector(StudioWindowController.ungroupShapes(_:))))
+        menu.addItem(.separator())
+        menu.addItem(menuItem("Align Left", #selector(StudioWindowController.alignLeft(_:))))
+        menu.addItem(menuItem("Align Center", #selector(StudioWindowController.alignCenter(_:))))
+        menu.addItem(menuItem("Align Right", #selector(StudioWindowController.alignRight(_:))))
+        menu.addItem(menuItem("Align Top", #selector(StudioWindowController.alignTop(_:))))
+        menu.addItem(menuItem("Align Middle", #selector(StudioWindowController.alignMiddle(_:))))
+        menu.addItem(menuItem("Align Bottom", #selector(StudioWindowController.alignBottom(_:))))
+        menu.addItem(menuItem("Distribute Horizontally", #selector(StudioWindowController.distributeHorizontal(_:))))
+        menu.addItem(menuItem("Distribute Vertically", #selector(StudioWindowController.distributeVertical(_:))))
+        return menu
+    }
+
+    private func extrasMenu() -> NSMenu {
+        let menu = NSMenu(title: "Extras")
+        menu.addItem(menuItem("Add Page", #selector(StudioWindowController.addPage(_:))))
+        menu.addItem(menuItem("Duplicate Page", #selector(StudioWindowController.duplicatePage(_:))))
+        menu.addItem(menuItem("Rename Page", #selector(StudioWindowController.renamePage(_:))))
+        menu.addItem(menuItem("Delete Page", #selector(StudioWindowController.deletePage(_:))))
+        return menu
+    }
+
+    private func helpMenu() -> NSMenu {
+        let menu = NSMenu(title: "Help")
+        menu.addItem(menuItem("About VSDX Studio", #selector(NSApplication.orderFrontStandardAboutPanel(_:)), target: NSApp))
+        return menu
+    }
+
+    private func menuItem(_ title: String, _ action: Selector, target: AnyObject? = nil) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
+        if let target {
+            item.target = target
+        } else if let actionTarget, actionTarget.responds(to: action) {
+            item.target = actionTarget
+        }
+        return item
+    }
+
+    private func toolItems() -> [NSView] {
+        let hand = icon("Pan", ["hand.raised", "hand.raised.fill"])
+        hand.identifier = NSUserInterfaceItemIdentifier("pointer")
+        bind(hand, #selector(StudioWindowController.chooseTool(_:)))
+        highlightButtons[.pointer] = hand
+
+        let zoomIn = icon("Zoom In", ["plus.magnifyingglass", "plus.circle"])
+        bind(zoomIn, #selector(StudioWindowController.zoomIn(_:)))
+        let zoomOut = icon("Zoom Out", ["minus.magnifyingglass", "minus.circle"])
+        bind(zoomOut, #selector(StudioWindowController.zoomOut(_:)))
+
+        let undo = icon("Undo", ["arrow.uturn.backward", "arrow.counterclockwise"])
+        bind(undo, resolved("undo:"))
+        let redo = icon("Redo", ["arrow.uturn.forward", "arrow.clockwise"])
+        bind(redo, resolved("redo:"))
+
+        let delete = icon("Delete", ["trash", "delete.left"])
+        bind(delete, #selector(StudioWindowController.deleteShapes(_:)))
+
+        let front = icon("To Front", ["square.3.layers.3d.top.filled", "square.2.layers.3d.top.filled"])
+        bind(front, resolved("orderFront:", fallback: #selector(StudioWindowController.bringToFront(_:))))
+        let back = icon("To Back", ["square.3.layers.3d.bottom.filled", "square.2.layers.3d.bottom.filled"])
+        bind(back, resolved("orderBack:", fallback: #selector(StudioWindowController.sendToBack(_:))))
+
+        let fill = icon("Fill Color", ["paintbucket.fill", "paintbucket", "drop.fill"], point: 16)
+        fill.tag = 1
+        fill.identifier = NSUserInterfaceItemIdentifier("fill-color")
+        fill.target = self
+        fill.action = #selector(colorClicked(_:))
+        addSwatch(to: fill, color: fillColor)
+        let line = icon("Line Color", ["pencil", "pencil.tip"], point: 16)
+        line.tag = 2
+        line.identifier = NSUserInterfaceItemIdentifier("line-color")
+        line.target = self
+        line.action = #selector(colorClicked(_:))
+        addSwatch(to: line, color: lineColor)
+        let shadow = icon("Shadow", ["square.fill.on.square.fill", "square.on.square"])
+        shadow.target = self
+        shadow.action = #selector(shadowClicked(_:))
+
+        let connector = icon("Connection", ["arrow.triangle.turn.up.right.diamond", "arrow.turn.up.right"])
+        connector.identifier = NSUserInterfaceItemIdentifier("connector")
+        bind(connector, #selector(StudioWindowController.chooseTool(_:)))
+        highlightButtons[.connector] = connector
+        let waypoints = icon("Waypoints", ["point.3.connected.trianglepath.dotted", "point.topleft.down.to.point.bottomright.curvepath"])
+        waypoints.identifier = NSUserInterfaceItemIdentifier("connector")
+        bind(waypoints, #selector(StudioWindowController.chooseTool(_:)))
+
+        let rectangle = icon("Rectangle", ["rectangle", "square"])
+        rectangle.identifier = NSUserInterfaceItemIdentifier("rectangle")
+        bind(rectangle, #selector(StudioWindowController.chooseTool(_:)))
+        highlightButtons[.rectangle] = rectangle
+        let shapes = icon("Shapes", ["diamond", "rhombus", "square.on.circle"])
+        shapes.target = self
+        shapes.action = #selector(shapesClicked(_:))
+        let table = icon("Table", ["tablecells", "square.grid.3x2"])
+        table.identifier = NSUserInterfaceItemIdentifier("rectangle")
+        bind(table, #selector(StudioWindowController.chooseTool(_:)))
+
+        let freehand = icon("Freehand", ["scribble", "pencil.tip", "pencil.and.scribble"])
+        freehand.identifier = NSUserInterfaceItemIdentifier("line")
+        bind(freehand, #selector(StudioWindowController.chooseTool(_:)))
+        highlightButtons[.line] = freehand
+        let generate = icon("Generate", ["sparkles", "wand.and.stars"])
+        generate.isEnabled = false
+        let layout = icon("Layout", ["square.grid.3x3", "rectangle.3.group"])
+        layout.isEnabled = false
+
+        let fullscreen = icon("Full Screen", ["arrow.up.left.and.arrow.down.right", "arrow.up.backward.and.arrow.down.forward"])
+        bind(fullscreen, #selector(NSWindow.toggleFullScreen(_:)))
+        let format = icon("Format", ["sidebar.right", "sidebar.trailing", "slider.horizontal.3"])
+        format.target = self
+        format.action = #selector(formatClicked(_:))
+        let collapse = icon("Collapse", ["chevron.up", "chevron.compact.up"])
+        collapse.target = self
+        collapse.action = #selector(collapseClicked(_:))
+
+        let zoomMenu = NSMenu(title: "Zoom")
+        zoomMenu.addItem(menuItem("Zoom In", #selector(StudioWindowController.zoomIn(_:))))
+        zoomMenu.addItem(menuItem("Zoom Out", #selector(StudioWindowController.zoomOut(_:))))
+        zoomMenu.addItem(menuItem("Actual Size", #selector(StudioWindowController.zoomActual(_:))))
+        zoomMenu.addItem(menuItem("Fit Page", #selector(StudioWindowController.zoomFit(_:))))
+        menus[ObjectIdentifier(zoomButton)] = zoomMenu
+        zoomButton.target = self
+        zoomButton.action = #selector(showMenu(_:))
+
+        return [
+            hand, separator(),
+            zoomButton, separator(),
+            zoomIn, zoomOut, separator(),
+            undo, redo, separator(),
+            delete, separator(),
+            front, back, separator(),
+            fill, line, shadow, separator(),
+            connector, waypoints, separator(),
+            rectangle, shapes, table, separator(),
+            freehand, generate, layout,
+            flexibleSpace(),
+            fullscreen, format, collapse
+        ]
+    }
+
+    private func icon(_ tip: String, _ names: [String], point: CGFloat = 18) -> ChromeButton {
+        let button = ChromeButton(kind: .icon)
+        button.toolTip = tip
+        button.image = symbol(names, description: tip, point: point)
+        button.widthAnchor.constraint(equalToConstant: 28).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
         return button
     }
 
-    private func symbolImage(_ name: String, _ title: String) -> NSImage? {
-        let image = NSImage(systemSymbolName: name, accessibilityDescription: title)
-        image?.size = NSSize(width: 18, height: 18)
-        image?.isTemplate = true
-        return image
-    }
-}
-
-private final class RibbonGroup: NSView {
-    var preferredWidth: CGFloat = 44
-}
-
-final class CommandButton: NSControl {
-    var isChosen = false {
-        didSet { layer?.backgroundColor = (isChosen ? StudioChrome.accentSoft : NSColor.clear).cgColor }
-    }
-
-    init(title: String, symbol: NSImage?, target: AnyObject?, action: Selector, width: CGFloat) {
-        super.init(frame: NSRect(x: 0, y: 0, width: width, height: 54))
-        self.target = target
-        self.action = action
-        toolTip = title
-        wantsLayer = true
-        layer?.cornerRadius = 6
-        let icon = NSImageView()
-        icon.image = symbol
-        icon.imageScaling = .scaleProportionallyDown
-        icon.translatesAutoresizingMaskIntoConstraints = false
-        let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 11)
-        label.alignment = .center
-        label.lineBreakMode = .byTruncatingTail
-        label.textColor = StudioChrome.title
-        label.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(icon)
-        addSubview(label)
-        translatesAutoresizingMaskIntoConstraints = false
+    private func addSwatch(to button: NSButton, color: NSColor) {
+        let stripe = NSView()
+        stripe.identifier = NSUserInterfaceItemIdentifier("swatch")
+        stripe.wantsLayer = true
+        stripe.layer?.backgroundColor = color.cgColor
+        stripe.layer?.cornerRadius = 1
+        stripe.layer?.borderWidth = 0.5
+        stripe.layer?.borderColor = NSColor(white: 0, alpha: 0.28).cgColor
+        stripe.translatesAutoresizingMaskIntoConstraints = false
+        button.addSubview(stripe)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: width),
-            heightAnchor.constraint(equalToConstant: 54),
-            icon.topAnchor.constraint(equalTo: topAnchor, constant: 4),
-            icon.centerXAnchor.constraint(equalTo: centerXAnchor),
-            icon.widthAnchor.constraint(equalToConstant: 20),
-            icon.heightAnchor.constraint(equalToConstant: 20),
-            label.topAnchor.constraint(equalTo: icon.bottomAnchor, constant: 2),
-            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
-            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
+            stripe.centerXAnchor.constraint(equalTo: button.centerXAnchor),
+            stripe.bottomAnchor.constraint(equalTo: button.bottomAnchor, constant: -3),
+            stripe.widthAnchor.constraint(equalToConstant: 14),
+            stripe.heightAnchor.constraint(equalToConstant: 3)
         ])
-        setContentCompressionResistancePriority(.required, for: .horizontal)
+    }
+
+    private func symbol(_ names: [String], description: String, point: CGFloat) -> NSImage? {
+        for name in names {
+            guard let image = NSImage(systemSymbolName: name, accessibilityDescription: description) else { continue }
+            image.isTemplate = true
+            image.size = NSSize(width: point, height: point)
+            return image
+        }
+        return nil
+    }
+
+    private func resolved(_ name: String, fallback: Selector? = nil) -> Selector {
+        let primary = NSSelectorFromString(name)
+        if actionTarget?.responds(to: primary) == true { return primary }
+        if let fallback, actionTarget?.responds(to: fallback) == true { return fallback }
+        return primary
+    }
+
+    private func bind(_ button: NSButton, _ selector: Selector) {
+        button.action = selector
+        if let actionTarget, actionTarget.responds(to: selector) {
+            button.target = actionTarget
+        } else {
+            button.target = nil
+        }
+    }
+
+    @objc private func showMenu(_ sender: NSButton) {
+        guard let menu = menus[ObjectIdentifier(sender)] else { return }
+        if let event = NSApp.currentEvent {
+            NSMenu.popUpContextMenu(menu, with: event, for: sender)
+        } else {
+            menu.popUp(positioning: nil, at: .zero, in: sender)
+        }
+    }
+
+    @objc private func shapesClicked(_ sender: Any?) {
+        onShapes?()
+    }
+
+    @objc private func formatClicked(_ sender: Any?) {
+        (sender as? ChromeButton)?.isChosen.toggle()
+        onFormat?()
+    }
+
+    @objc private func collapseClicked(_ sender: Any?) {
+        onCollapse?()
+    }
+
+    @objc private func shadowClicked(_ sender: Any?) {
+        let selector = NSSelectorFromString("toggleShadow:")
+        if let actionTarget, actionTarget.responds(to: selector) {
+            _ = NSApp.sendAction(selector, to: actionTarget, from: sender)
+            return
+        }
+        (sender as? ChromeButton)?.isChosen.toggle()
+    }
+
+    @objc private func colorClicked(_ sender: NSButton) {
+        let names = sender.tag == 2
+            ? ["pickStroke:", "pickLine:", "setLineColor:", "lineColor:", "chooseLineColor:"]
+            : ["pickFill:", "setFillColor:", "fillColor:", "chooseFillColor:"]
+        if let actionTarget {
+            for name in names {
+                let selector = NSSelectorFromString(name)
+                if actionTarget.responds(to: selector) {
+                    _ = NSApp.sendAction(selector, to: actionTarget, from: sender)
+                    return
+                }
+            }
+        }
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = false
+        panel.isContinuous = true
+        panel.color = sender.tag == 2 ? lineColor : fillColor
+        colorSender = sender
+        panel.setTarget(self)
+        panel.setAction(#selector(colorChanged(_:)))
+        panel.orderFront(sender)
+    }
+
+    @objc private func colorChanged(_ panel: NSColorPanel) {
+        guard let button = colorSender else { return }
+        if button.tag == 2 {
+            lineColor = panel.color
+        } else {
+            fillColor = panel.color
+        }
+        button.subviews.first { $0.identifier?.rawValue == "swatch" }?.layer?.backgroundColor = panel.color.cgColor
+    }
+}
+
+private final class AppMark: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = DiagramBarColor.orange.cgColor
+        layer?.cornerRadius = 8
+        layer?.masksToBounds = true
+        translatesAutoresizingMaskIntoConstraints = false
+        widthAnchor.constraint(equalToConstant: 32).isActive = true
+        heightAnchor.constraint(equalToConstant: 36).isActive = true
         setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        toolTip = "VSDX Studio"
     }
 
     required init?(coder: NSCoder) { nil }
 
-    override func mouseUp(with event: NSEvent) {
-        if let action, bounds.contains(convert(event.locationInWindow, from: nil)) {
-            NSApp.sendAction(action, to: target, from: self)
+    override var intrinsicContentSize: NSSize { NSSize(width: 32, height: 36) }
+
+    override func draw(_ dirtyRect: NSRect) {
+        DiagramBarColor.orange.setFill()
+        NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8).fill()
+        NSColor.white.setStroke()
+        NSColor.white.setFill()
+        let line = NSBezierPath()
+        line.lineWidth = 1.5
+        line.lineCapStyle = .round
+        line.move(to: NSPoint(x: 10, y: 23))
+        line.line(to: NSPoint(x: 16, y: 13))
+        line.move(to: NSPoint(x: 22, y: 23))
+        line.line(to: NSPoint(x: 16, y: 13))
+        line.stroke()
+        for center in [NSPoint(x: 10, y: 23), NSPoint(x: 22, y: 23), NSPoint(x: 16, y: 13)] {
+            NSBezierPath(ovalIn: NSRect(x: center.x - 2.3, y: center.y - 2.3, width: 4.6, height: 4.6)).fill()
         }
+    }
+}
+
+private final class StatusPill: NSView {
+    let label = NSTextField(labelWithString: "")
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.backgroundColor = DiagramBarColor.statusFill.cgColor
+        layer?.masksToBounds = true
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = DiagramBarColor.statusText
+        label.translatesAutoresizingMaskIntoConstraints = false
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.setContentCompressionResistancePriority(.required, for: .horizontal)
+        addSubview(label)
+        translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            label.topAnchor.constraint(equalTo: topAnchor, constant: 3),
+            label.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -3)
+        ])
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        isHidden = true
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func layout() {
+        super.layout()
+        layer?.cornerRadius = bounds.height / 2
+    }
+}
+
+private final class ChromeButton: NSButton {
+    enum Kind {
+        case icon
+        case text
+        case zoom
+        case share
+    }
+
+    let kind: Kind
+    private let chromeCell = ChromeButtonCell(textCell: "")
+    var isChosen = false {
+        didSet { applyStyle() }
+    }
+    private var isHovered = false
+    private var hoverArea: NSTrackingArea?
+
+    init(kind: Kind) {
+        self.kind = kind
+        super.init(frame: .zero)
+        setButtonType(.momentaryChange)
+        isBordered = false
+        focusRingType = .none
+        wantsLayer = true
+        cell = chromeCell
+        chromeCell.highlightsBy = []
+        chromeCell.showsStateBy = []
+        chromeCell.imageDimsWhenDisabled = false
+        chromeCell.imageScaling = .scaleProportionallyDown
+        chromeCell.alignment = .center
+        chromeCell.isBordered = false
+        chromeCell.refusesFirstResponder = true
+        translatesAutoresizingMaskIntoConstraints = false
+        setContentHuggingPriority(.required, for: .horizontal)
+        setContentCompressionResistancePriority(.required, for: .horizontal)
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+        applyStyle()
+    }
+
+    required init?(coder: NSCoder) {
+        kind = .icon
+        return nil
+    }
+
+    func setLabel(_ text: String, size: CGFloat, weight: NSFont.Weight, monospaced: Bool = false) {
+        let font = monospaced
+            ? NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
+            : NSFont.systemFont(ofSize: size, weight: weight)
+        title = text
+        attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: DiagramBarColor.ink
+        ])
+        chromeCell.font = font
+        invalidateIntrinsicContentSize()
+    }
+
+    override var intrinsicContentSize: NSSize {
+        switch kind {
+        case .icon:
+            return NSSize(width: 28, height: 28)
+        case .zoom:
+            return NSSize(width: 62, height: 28)
+        case .text:
+            let size = attributedTitle.size()
+            return NSSize(width: ceil(size.width) + 16, height: ceil(max(size.height, 14)) + 8)
+        case .share:
+            let size = attributedTitle.size()
+            return NSSize(width: ceil(size.width) + 32, height: 32)
+        }
+    }
+
+    override var acceptsFirstResponder: Bool { false }
+
+    override var isEnabled: Bool {
+        didSet { applyStyle() }
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let hoverArea { removeTrackingArea(hoverArea) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        hoverArea = area
+        addTrackingArea(area)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        super.mouseEntered(with: event)
+        guard isEnabled else { return }
+        isHovered = true
+        applyStyle()
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        super.mouseExited(with: event)
+        isHovered = false
+        applyStyle()
+    }
+
+    private func applyStyle() {
+        let emphasized = isEnabled && (isHovered || isChosen)
+        switch kind {
+        case .icon:
+            alphaValue = isEnabled ? 1 : 0.3
+            contentTintColor = NSColor(white: 0, alpha: emphasized || !isEnabled ? 1 : 0.65)
+            chromeCell.baseFill = .clear
+            chromeCell.hoverFill = DiagramBarColor.hover
+            chromeCell.corner = 6
+            chromeCell.strokeColor = nil
+            chromeCell.isHovered = emphasized
+            imagePosition = .imageOnly
+        case .text:
+            alphaValue = 1
+            contentTintColor = DiagramBarColor.ink
+            chromeCell.baseFill = .clear
+            chromeCell.hoverFill = DiagramBarColor.hover
+            chromeCell.corner = 6
+            chromeCell.strokeColor = nil
+            chromeCell.isHovered = isHovered && isEnabled
+            imagePosition = .noImage
+        case .zoom:
+            alphaValue = 1
+            contentTintColor = DiagramBarColor.ink
+            chromeCell.baseFill = .clear
+            chromeCell.hoverFill = DiagramBarColor.hover
+            chromeCell.corner = 6
+            chromeCell.strokeColor = DiagramBarColor.hairline
+            chromeCell.isHovered = isHovered && isEnabled
+            imagePosition = .noImage
+        case .share:
+            alphaValue = 1
+            contentTintColor = DiagramBarColor.ink
+            chromeCell.baseFill = DiagramBarColor.share
+            chromeCell.hoverFill = DiagramBarColor.share
+            chromeCell.corner = 4
+            chromeCell.strokeColor = nil
+            chromeCell.isHovered = false
+            imagePosition = .noImage
+        }
+        let fill = chromeCell.isHovered ? chromeCell.hoverFill : chromeCell.baseFill
+        layer?.backgroundColor = fill.cgColor
+        layer?.cornerRadius = chromeCell.corner
+        layer?.masksToBounds = true
+        needsDisplay = true
+    }
+}
+
+private final class ChromeButtonCell: NSButtonCell {
+    var baseFill: NSColor = .clear
+    var hoverFill: NSColor = .clear
+    var corner: CGFloat = 6
+    var isHovered = false
+    var strokeColor: NSColor?
+
+    override init(textCell string: String) {
+        super.init(textCell: string)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func draw(withFrame frame: NSRect, in controlView: NSView) {
+        let fill = isHovered ? hoverFill : baseFill
+        if fill.alphaComponent > 0.001 {
+            fill.setFill()
+            NSBezierPath(roundedRect: frame, xRadius: corner, yRadius: corner).fill()
+        }
+        if let strokeColor {
+            strokeColor.setStroke()
+            let path = NSBezierPath(roundedRect: frame.insetBy(dx: 0.5, dy: 0.5), xRadius: corner, yRadius: corner)
+            path.lineWidth = 1
+            path.stroke()
+        }
+        drawInterior(withFrame: frame, in: controlView)
+    }
+
+    override func drawTitle(_ title: NSAttributedString, withFrame frame: NSRect, in controlView: NSView) -> NSRect {
+        let text = attributedTitle.length > 0 ? attributedTitle : title
+        let size = text.size()
+        let rect = NSRect(
+            x: floor(frame.midX - size.width / 2),
+            y: floor(frame.midY - size.height / 2),
+            width: ceil(size.width),
+            height: ceil(size.height)
+        )
+        text.draw(with: rect, options: [.usesLineFragmentOrigin], context: nil)
+        return rect
     }
 }
