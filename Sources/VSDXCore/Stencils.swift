@@ -35,16 +35,30 @@ public enum StencilCatalog {
     public static func previewPage(id: String) -> DiagramPage {
         var page = DiagramPage(id: 0, name: "Preview", width: 2.2, height: 1.5)
         var shape = make(id: id, shapeId: 1, center: CGPoint(x: 1.1, y: 0.75))
-        let kind = id
-        if kind.contains("line") || kind.contains("connector") || kind.contains("arrow-line") {
-            shape.setNumber("BeginX", 0.25, clearFormula: true)
-            shape.setNumber("BeginY", 0.75, clearFormula: true)
-            shape.setNumber("EndX", 1.95, clearFormula: true)
-            shape.setNumber("EndY", 0.75, clearFormula: true)
-            ConnectorRoute.apply(points: [CGPoint(x: 0.25, y: 0.75), CGPoint(x: 1.95, y: 0.75)], to: &shape)
+        if let style = previewStyle(id) {
+            let start = CGPoint(x: 0.28, y: 0.42)
+            let end = CGPoint(x: 1.92, y: 1.08)
+            let points = ConnectorRoute.route(
+                style: style,
+                start: start,
+                startDir: CGPoint(x: 1, y: 0),
+                end: end,
+                endDir: CGPoint(x: -1, y: 0)
+            )
+            ConnectorRoute.apply(points: points, to: &shape, style: style)
         }
         page.shapes = [shape]
         return page
+    }
+
+    private static func previewStyle(_ id: String) -> ConnectorStyle? {
+        switch id {
+        case "line", "straight-arrow": return .straight
+        case "elbow": return .simple
+        case "curve": return .curve
+        case "connector": return .elbow
+        default: return nil
+        }
     }
 
     private static func factory(_ id: String) -> (Int) -> ShapeNode {
@@ -174,12 +188,30 @@ public enum StencilCatalog {
     }
 }
 
-public enum ConnectorStyle {
-    case straight, elbow, curve
+public enum ConnectorStyle: Equatable {
+    case straight, simple, elbow, curve
+
+    public var routeValue: String {
+        switch self {
+        case .straight: return "0"
+        case .simple: return "3"
+        case .curve: return "2"
+        case .elbow: return "1"
+        }
+    }
+
+    public static func from(route value: String?) -> ConnectorStyle {
+        switch Int(Format.parseDouble(value) ?? 1) {
+        case 0: return .straight
+        case 2: return .curve
+        case 3: return .simple
+        default: return .elbow
+        }
+    }
 }
 
 public enum ConnectorRoute {
-    public static func apply(points: [CGPoint], to shape: inout ShapeNode) {
+    public static func apply(points: [CGPoint], to shape: inout ShapeNode, style: ConnectorStyle = .elbow) {
         guard points.count >= 2 else { return }
         let xs = points.map(\.x)
         let ys = points.map(\.y)
@@ -200,18 +232,42 @@ public enum ConnectorRoute {
         shape.setNumber("BeginY", Double(points[0].y), clearFormula: true)
         shape.setNumber("EndX", Double(points[points.count - 1].x), clearFormula: true)
         shape.setNumber("EndY", Double(points[points.count - 1].y), clearFormula: true)
+        shape.setCell("ShapeRouteStyle", value: style.routeValue, clearFormula: true)
+        shape.setCell("FillPattern", value: "0", clearFormula: true)
         var section = GeoSection()
-        for (index, point) in points.enumerated() {
-            let x = Double(point.x) - minX
-            let y = Double(point.y) - minY
-            section.rows.append(GeoRow(type: index == 0 ? "MoveTo" : "LineTo", ix: index + 1, cells: [
-                "X": Cell(value: Format.number(x)),
-                "Y": Cell(value: Format.number(y))
-            ]))
+        section.noFill = true
+        if style == .curve, points.count >= 3 {
+            let start = local(points[0], minX: minX, minY: minY)
+            let control = local(points[1], minX: minX, minY: minY)
+            let end = local(points[points.count - 1], minX: minX, minY: minY)
+            section.rows = [
+                GeoRow(type: "MoveTo", ix: 1, cells: [
+                    "X": Cell(value: Format.number(start.0)),
+                    "Y": Cell(value: Format.number(start.1))
+                ]),
+                GeoRow(type: "QuadBezTo", ix: 2, cells: [
+                    "X": Cell(value: Format.number(end.0)),
+                    "Y": Cell(value: Format.number(end.1)),
+                    "A": Cell(value: Format.number(control.0)),
+                    "B": Cell(value: Format.number(control.1))
+                ])
+            ]
+        } else {
+            for (index, point) in points.enumerated() {
+                let pair = local(point, minX: minX, minY: minY)
+                section.rows.append(GeoRow(type: index == 0 ? "MoveTo" : "LineTo", ix: index + 1, cells: [
+                    "X": Cell(value: Format.number(pair.0)),
+                    "Y": Cell(value: Format.number(pair.1))
+                ]))
+            }
         }
         shape.geometry = [section]
         shape.detached = true
         shape.original = nil
+    }
+
+    private static func local(_ point: CGPoint, minX: Double, minY: Double) -> (Double, Double) {
+        (Double(point.x) - minX, Double(point.y) - minY)
     }
 
     public static func route(style: ConnectorStyle, start: CGPoint, startDir: CGPoint, end: CGPoint, endDir: CGPoint) -> [CGPoint] {
@@ -220,9 +276,21 @@ public enum ConnectorRoute {
             return [start, end]
         case .curve:
             return curve(start, end)
+        case .simple:
+            return simple(start, end)
         case .elbow:
             return elbow(start, startDir, end, endDir)
         }
+    }
+
+    private static func simple(_ start: CGPoint, _ end: CGPoint) -> [CGPoint] {
+        if abs(end.x - start.x) < 0.02 || abs(end.y - start.y) < 0.02 {
+            return [start, end]
+        }
+        if abs(end.x - start.x) >= abs(end.y - start.y) {
+            return [start, CGPoint(x: end.x, y: start.y), end]
+        }
+        return [start, CGPoint(x: start.x, y: end.y), end]
     }
 
     private static func curve(_ start: CGPoint, _ end: CGPoint) -> [CGPoint] {
@@ -243,20 +311,33 @@ public enum ConnectorRoute {
         let width = Format.parseDouble(shape.cell("Width")?.value) ?? 0
         let height = Format.parseDouble(shape.cell("Height")?.value) ?? 0
         guard let section = shape.geometry.first else { return [] }
-        return section.rows.filter { !$0.deleted }.map { row in
-            var x = Format.parseDouble(row.raw("X")) ?? 0
-            var y = Format.parseDouble(row.raw("Y")) ?? 0
-            if row.type.hasPrefix("Rel") {
-                x *= width
-                y *= height
+        func map(_ x: Double, _ y: Double, relative: Bool) -> CGPoint {
+            var px = x
+            var py = y
+            if relative {
+                px *= width
+                py *= height
             }
-            let localX = x - locX
-            let localY = y - locY
+            let localX = px - locX
+            let localY = py - locY
             return CGPoint(
                 x: pinX + localX * cos(angle) - localY * sin(angle),
                 y: pinY + localX * sin(angle) + localY * cos(angle)
             )
         }
+        var result: [CGPoint] = []
+        for row in section.rows where !row.deleted {
+            let relative = row.type.hasPrefix("Rel")
+            if row.type == "QuadBezTo" || row.type == "RelQuadBezTo" {
+                let ax = Format.parseDouble(row.raw("A")) ?? 0
+                let ay = Format.parseDouble(row.raw("B")) ?? 0
+                result.append(map(ax, ay, relative: relative))
+            }
+            let x = Format.parseDouble(row.raw("X")) ?? 0
+            let y = Format.parseDouble(row.raw("Y")) ?? 0
+            result.append(map(x, y, relative: relative))
+        }
+        return result
     }
 
     public static func axisDirection(from: CGPoint, to: CGPoint) -> CGPoint {
@@ -562,11 +643,28 @@ private func textBox(_ id: Int) -> ShapeNode {
 private func connector(_ id: Int, style: ConnectorStyle, arrow: Int) -> ShapeNode {
     var shape = base(id, 1.5, 0, text: "")
     shape.setCell("LinePattern", value: "1", clearFormula: true)
+    shape.setCell("FillPattern", value: "0", clearFormula: true)
     shape.setCell("EndArrow", value: String(arrow), clearFormula: true)
     shape.setCell("EndArrowSize", value: "2", clearFormula: true)
     shape.setCell("BeginArrow", value: "0", clearFormula: true)
-    shape.setCell("ShapeRouteStyle", value: style == .straight ? "0" : (style == .curve ? "2" : "1"), clearFormula: true)
-    ConnectorRoute.apply(points: [CGPoint(x: 0, y: 0), CGPoint(x: 1.5, y: 0)], to: &shape)
+    let points: [CGPoint]
+    switch style {
+    case .straight:
+        points = [CGPoint(x: 0, y: 0), CGPoint(x: 1.5, y: 0)]
+    case .simple:
+        points = [CGPoint(x: 0, y: 0), CGPoint(x: 0.9, y: 0), CGPoint(x: 0.9, y: 0.55)]
+    case .curve:
+        points = ConnectorRoute.route(
+            style: .curve,
+            start: CGPoint(x: 0, y: 0.1),
+            startDir: CGPoint(x: 1, y: 0),
+            end: CGPoint(x: 1.5, y: 0.7),
+            endDir: CGPoint(x: 1, y: 0)
+        )
+    case .elbow:
+        points = [CGPoint(x: 0, y: 0), CGPoint(x: 0.75, y: 0), CGPoint(x: 0.75, y: 0.5), CGPoint(x: 1.5, y: 0.5)]
+    }
+    ConnectorRoute.apply(points: points, to: &shape, style: style)
     shape.setCell("ObjType", value: "2", clearFormula: true)
     return shape
 }

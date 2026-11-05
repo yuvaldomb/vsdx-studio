@@ -10,6 +10,7 @@ protocol CanvasHost: AnyObject {
     var snapEnabled: Bool { get }
     var showGrid: Bool { get }
     var showConnections: Bool { get }
+    var connectorStyle: ConnectorStyle { get }
     func beginPreview()
     func preview(_ body: (inout Diagram) -> Void)
     func commitPreview(_ name: String)
@@ -26,6 +27,7 @@ final class CanvasView: NSView {
     var tool: EditorTool = .pointer
     var showGrid = true
     var showConnections = true
+    var showHoverArrows = true
     var snapEnabled = true
     var zoom: CGFloat = 1
     var guides: [GuideLine] = []
@@ -39,6 +41,10 @@ final class CanvasView: NSView {
     private let textEditor = NSTextView()
     private var editingID: Int?
     private let margin: CGFloat = 48
+    private static let canvasBackdrop = NSColor(srgbRed: 236 / 255, green: 236 / 255, blue: 236 / 255, alpha: 1)
+    private static let pageShadowColor = NSColor(srgbRed: 160 / 255, green: 160 / 255, blue: 160 / 255, alpha: 1)
+    private static let selectionBlue = NSColor(srgbRed: 0 / 255, green: 168 / 255, blue: 255 / 255, alpha: 1)
+    private static let handleBlue = NSColor(srgbRed: 41 / 255, green: 182 / 255, blue: 242 / 255, alpha: 1)
 
     private enum DragMode {
         case none
@@ -70,7 +76,7 @@ final class CanvasView: NSView {
     override var isFlipped: Bool { true }
     override var acceptsFirstResponder: Bool { true }
 
-    var pixelsPerInch: CGFloat { 72 * zoom }
+    var pixelsPerInch: CGFloat { 100 * zoom }
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -124,15 +130,22 @@ final class CanvasView: NSView {
     }
 
     override func draw(_ dirtyRect: NSRect) {
-        StudioChrome.pasteboard.setFill()
+        Self.canvasBackdrop.setFill()
         dirtyRect.fill()
         let pageRect = pageViewRect()
-        NSColor.black.withAlphaComponent(0.18).setFill()
-        pageRect.offsetBy(dx: 4, dy: 4).fill()
+        NSGraphicsContext.saveGraphicsState()
+        let shadow = NSShadow()
+        shadow.shadowColor = Self.pageShadowColor
+        shadow.shadowOffset = NSSize(width: 0, height: 0)
+        shadow.shadowBlurRadius = 3
+        shadow.set()
         NSColor.white.setFill()
         pageRect.fill()
-        NSColor(calibratedWhite: 0.75, alpha: 1).setStroke()
-        NSBezierPath(rect: pageRect).stroke()
+        NSGraphicsContext.restoreGraphicsState()
+        NSColor.white.setStroke()
+        let border = NSBezierPath(rect: pageRect)
+        border.lineWidth = 1
+        border.stroke()
         if showGrid { drawGrid(in: pageRect) }
         drawGuides(in: pageRect)
         guard let context = NSGraphicsContext.current?.cgContext else { return }
@@ -198,20 +211,19 @@ final class CanvasView: NSView {
         let items = layoutItems()
         let wiring = isWiring || tool == .connector || tool == .line
         for item in items where !item.is1D {
-            let show = showConnections || wiring || (item.id == hoverID && !selection.contains(item.id))
-            guard show else { continue }
+            guard showConnections || wiring else { continue }
             for port in ports(of: item) {
                 let highlighted = wireTarget?.shape == item.id && wireTarget?.index == port.index
                 let view = pageToView(port.anchor)
-                let arm: CGFloat = highlighted ? 5 : 3.5
+                let arm: CGFloat = 2.5
                 let mark = NSBezierPath()
                 mark.move(to: NSPoint(x: view.x - arm, y: view.y - arm))
                 mark.line(to: NSPoint(x: view.x + arm, y: view.y + arm))
                 mark.move(to: NSPoint(x: view.x - arm, y: view.y + arm))
                 mark.line(to: NSPoint(x: view.x + arm, y: view.y - arm))
-                (highlighted ? NSColor.systemGreen : NSColor.systemBlue).setStroke()
-                mark.lineWidth = highlighted ? 2 : 1.4
-                mark.lineCapStyle = .round
+                Self.handleBlue.setStroke()
+                mark.lineWidth = highlighted ? 1.5 : 1
+                mark.lineCapStyle = .butt
                 mark.stroke()
             }
         }
@@ -222,14 +234,27 @@ final class CanvasView: NSView {
         let target = wireTarget?.anchor ?? end
         let startDir = layoutItems().first { $0.id == shape }?.connectionDirs[safe: index] ?? CGPoint(x: 1, y: 0)
         let dir = wireTarget?.dir ?? CGPoint(x: -startDir.x, y: -startDir.y)
-        let points = ConnectorRoute.route(style: .elbow, start: anchor, startDir: startDir, end: target, endDir: dir)
+        let style = host?.connectorStyle ?? .elbow
+        let points = ConnectorRoute.route(style: style, start: anchor, startDir: startDir, end: target, endDir: dir)
         let path = NSBezierPath()
-        for (index, point) in points.enumerated() {
-            let view = pageToView(point)
-            if index == 0 { path.move(to: view) } else { path.line(to: view) }
+        if style == .curve, points.count >= 3 {
+            let start = pageToView(points[0])
+            let control = pageToView(points[1])
+            let end = pageToView(points[points.count - 1])
+            path.move(to: start)
+            path.curve(
+                to: end,
+                controlPoint1: NSPoint(x: start.x + (control.x - start.x) * 2 / 3, y: start.y + (control.y - start.y) * 2 / 3),
+                controlPoint2: NSPoint(x: end.x + (control.x - end.x) * 2 / 3, y: end.y + (control.y - end.y) * 2 / 3)
+            )
+        } else {
+            for (index, point) in points.enumerated() {
+                let view = pageToView(point)
+                if index == 0 { path.move(to: view) } else { path.line(to: view) }
+            }
         }
-        NSColor.systemBlue.setStroke()
-        path.lineWidth = 1.6
+        NSColor.black.setStroke()
+        path.lineWidth = 1.25
         path.stroke()
         if points.count >= 2 {
             let tip = pageToView(points[points.count - 1])
@@ -253,18 +278,51 @@ final class CanvasView: NSView {
     }
 
     private func drawHoverArrows() {
-        guard tool == .pointer, !isWiring, let id = hoverID, let item = layoutItems().first(where: { $0.id == id && !$0.is1D }) else { return }
-        let sides: [(CGPoint, CGPoint)] = [
+        guard showHoverArrows, tool == .pointer, !isWiring, let id = hoverID, let item = layoutItems().first(where: { $0.id == id && !$0.is1D }) else { return }
+        for (mid, dir) in perimeterSides(of: item) {
+            let arrow = hoverArrowEnds(mid: mid, dir: dir)
+            drawHoverArrow(tip: arrow.tip, from: arrow.tail)
+        }
+    }
+
+    private func drawHoverArrow(tip: NSPoint, from: NSPoint) {
+        let angle = atan2(tip.y - from.y, tip.x - from.x)
+        let length = hypot(tip.x - from.x, tip.y - from.y)
+        let shaft = NSBezierPath()
+        let neck = max(0, length - 6)
+        shaft.move(to: from)
+        shaft.line(to: NSPoint(x: from.x + neck * cos(angle), y: from.y + neck * sin(angle)))
+        Self.handleBlue.setStroke()
+        shaft.lineWidth = 1.5
+        shaft.lineCapStyle = .round
+        shaft.stroke()
+        let headLength: CGFloat = 6
+        let headWidth: CGFloat = 3.5
+        let head = NSBezierPath()
+        head.move(to: tip)
+        head.line(to: NSPoint(x: tip.x - headLength * cos(angle) + headWidth * sin(angle), y: tip.y - headLength * sin(angle) - headWidth * cos(angle)))
+        head.line(to: NSPoint(x: tip.x - headLength * cos(angle) - headWidth * sin(angle), y: tip.y - headLength * sin(angle) + headWidth * cos(angle)))
+        head.close()
+        Self.handleBlue.setFill()
+        head.fill()
+    }
+
+    private func perimeterSides(of item: LayoutItem) -> [(CGPoint, CGPoint)] {
+        [
             (CGPoint(x: item.bounds.midX, y: item.bounds.minY), CGPoint(x: 0, y: -1)),
             (CGPoint(x: item.bounds.maxX, y: item.bounds.midY), CGPoint(x: 1, y: 0)),
             (CGPoint(x: item.bounds.midX, y: item.bounds.maxY), CGPoint(x: 0, y: 1)),
             (CGPoint(x: item.bounds.minX, y: item.bounds.midY), CGPoint(x: -1, y: 0))
         ]
-        for (mid, dir) in sides {
-            let tip = pageToView(CGPoint(x: mid.x + dir.x * 0.22, y: mid.y + dir.y * 0.22))
-            let tail = pageToView(CGPoint(x: mid.x + dir.x * 0.05, y: mid.y + dir.y * 0.05))
-            drawArrowHead(tip: tip, from: tail)
-        }
+    }
+
+    private func hoverArrowEnds(mid: CGPoint, dir: CGPoint) -> (tail: CGPoint, tip: CGPoint) {
+        let midView = pageToView(mid)
+        let viewDir = CGPoint(x: dir.x, y: -dir.y)
+        return (
+            CGPoint(x: midView.x + viewDir.x * 6, y: midView.y + viewDir.y * 6),
+            CGPoint(x: midView.x + viewDir.x * 15, y: midView.y + viewDir.y * 15)
+        )
     }
 
     private func drawSelection() {
@@ -280,22 +338,19 @@ final class CanvasView: NSView {
                     if index == 0 { outline.move(to: view) } else { outline.line(to: view) }
                 }
                 outline.close()
-                NSColor.systemBlue.setStroke()
-                outline.lineWidth = 1.25
-                let dash: [CGFloat] = [5, 4]
+                Self.selectionBlue.setStroke()
+                outline.lineWidth = 1
+                let dash: [CGFloat] = [3, 3]
                 outline.setLineDash(dash, count: 2, phase: 0)
                 outline.stroke()
             }
-            NSColor.systemBlue.setFill()
             if shape.is1D {
                 for point in ConnectorRoute.pagePoints(shape) {
-                    let view = pageToView(point)
-                    NSBezierPath(ovalIn: NSRect(x: view.x - 4.5, y: view.y - 4.5, width: 9, height: 9)).fill()
+                    drawResizeHandle(at: pageToView(point))
                 }
             } else {
                 for (_, point) in handles {
-                    let view = pageToView(point)
-                    NSBezierPath(ovalIn: NSRect(x: view.x - 4.5, y: view.y - 4.5, width: 9, height: 9)).fill()
+                    drawResizeHandle(at: pageToView(point))
                 }
             }
             if !shape.is1D, let corner = handles[.ne] {
@@ -304,25 +359,39 @@ final class CanvasView: NSView {
         }
     }
 
+    private func drawResizeHandle(at view: CGPoint) {
+        let circle = NSBezierPath(ovalIn: NSRect(x: view.x - 5, y: view.y - 5, width: 10, height: 10))
+        Self.handleBlue.setFill()
+        circle.fill()
+        NSColor.white.setStroke()
+        circle.lineWidth = 1
+        circle.stroke()
+    }
+
     private func rotateKnob(for corner: CGPoint) -> NSPoint {
         let view = pageToView(corner)
-        return NSPoint(x: view.x + 16, y: view.y - 16)
+        return NSPoint(x: view.x + 12, y: view.y - 12)
     }
 
     private func drawRotateIcon(at center: NSPoint) {
+        let radius: CGFloat = 5.25
         let arc = NSBezierPath()
-        arc.appendArc(withCenter: center, radius: 6, startAngle: 50, endAngle: 310, clockwise: false)
-        NSColor.systemBlue.setStroke()
-        arc.lineWidth = 1.5
+        arc.appendArc(withCenter: center, radius: radius, startAngle: 50, endAngle: 310, clockwise: false)
+        Self.handleBlue.setStroke()
+        arc.lineWidth = 1.35
+        arc.lineCapStyle = .round
         arc.stroke()
         let angle = 310 * CGFloat.pi / 180
-        let tip = NSPoint(x: center.x + 6 * cos(angle), y: center.y + 6 * sin(angle))
+        let tip = NSPoint(x: center.x + radius * cos(angle), y: center.y + radius * sin(angle))
         let head = NSBezierPath()
         head.move(to: tip)
-        head.line(to: NSPoint(x: tip.x - 5, y: tip.y + 1))
+        head.line(to: NSPoint(x: tip.x - 3.1, y: tip.y + 0.6))
         head.move(to: tip)
-        head.line(to: NSPoint(x: tip.x + 1, y: tip.y + 5))
-        head.lineWidth = 1.5
+        head.line(to: NSPoint(x: tip.x + 0.6, y: tip.y + 3.1))
+        Self.handleBlue.setStroke()
+        head.lineWidth = 1.35
+        head.lineCapStyle = .round
+        head.lineJoinStyle = .round
         head.stroke()
     }
 
@@ -366,6 +435,15 @@ final class CanvasView: NSView {
         host?.statusPoint(pagePoint)
         let shift = event.modifierFlags.contains(.shift)
         snapOff = event.modifierFlags.contains(.option)
+        if tool == .pointer, event.clickCount >= 2,
+           let hit = PageLayout.hitTest(page: page, point: pagePoint, theme: theme, colors: colors, slop: 8 / pixelsPerInch) {
+            let id = selectionTarget(hit)
+            selection = [id]
+            host?.selection = selection
+            dragMode = .none
+            beginTextEditing(id: id)
+            return
+        }
         if tool == .connector || tool == .line, let port = hitPort(at: pagePoint) {
             dragMode = .wire(port.shape, port.index, port.anchor)
             wireEnd = pagePoint
@@ -397,6 +475,11 @@ final class CanvasView: NSView {
             needsDisplay = true
             return
         }
+        if tool == .pointer, let id = hitRotate(at: viewPoint) {
+            host?.beginPreview()
+            dragMode = .rotate(id)
+            return
+        }
         if tool == .pointer, let handle = hitHandle(at: viewPoint) {
             host?.beginPreview()
             if handle.1 == .beginPoint || handle.1 == .endPoint {
@@ -411,11 +494,6 @@ final class CanvasView: NSView {
             wireEnd = pagePoint
             wireTarget = nil
             needsDisplay = true
-            return
-        }
-        if tool == .pointer, hitRotate(at: viewPoint) != nil, let id = selection.last {
-            host?.beginPreview()
-            dragMode = .rotate(id)
             return
         }
         switch tool {
@@ -465,10 +543,14 @@ final class CanvasView: NSView {
         case .move(let start, let ids, let bounds):
             var dx = Double(pagePoint.x - start.x)
             var dy = Double(pagePoint.y - start.y)
+            let lockHorizontal = shift && abs(dx) >= abs(dy)
+            let lockVertical = shift && !lockHorizontal
+            if lockHorizontal { dy = 0 }
+            if lockVertical { dx = 0 }
             if snapEnabled && !snapOff, !bounds.isNull {
                 let snapped = GridSnap.translation(bounds: bounds, dx: dx, dy: dy)
-                dx = snapped.0
-                dy = snapped.1
+                dx = lockVertical ? 0 : snapped.0
+                dy = lockHorizontal ? 0 : snapped.1
             }
             host?.preview { diagram in
                 guard diagram.pages.indices.contains(host?.pageIndex ?? 0) else { return }
@@ -555,8 +637,14 @@ final class CanvasView: NSView {
                         self.attachNewConnector(in: &diagram, begin: begin.port, end: end.port)
                     }
                 } else if hypot(pagePoint.x - start.x, pagePoint.y - start.y) < 0.05 {
+                    let size: CGSize
+                    switch tool {
+                    case .ellipse: size = CGSize(width: 1.2, height: 0.8)
+                    case .rectangle: size = CGSize(width: 1.2, height: 0.6)
+                    default: size = CGSize(width: 1.5, height: 1)
+                    }
                     host?.preview { diagram in
-                        self.previewCreate(in: &diagram, start: start, current: CGPoint(x: start.x + 1.5, y: start.y - 1), constrain: false, snapPoints: true)
+                        self.previewCreate(in: &diagram, start: start, current: CGPoint(x: start.x + size.width, y: start.y - size.height), constrain: false, snapPoints: true)
                     }
                 }
             }
@@ -607,7 +695,10 @@ final class CanvasView: NSView {
     override func mouseMoved(with event: NSEvent) {
         let pagePoint = viewToPage(convert(event.locationInWindow, from: nil))
         host?.statusPoint(pagePoint)
-        let hit = PageLayout.hitTest(page: page, point: pagePoint, theme: theme, colors: colors, slop: 4 / pixelsPerInch)
+        var hit = PageLayout.hitTest(page: page, point: pagePoint, theme: theme, colors: colors, slop: 4 / pixelsPerInch)
+        if hit == nil, hoverID != nil, hitArrow(at: pagePoint) != nil {
+            hit = hoverID
+        }
         if hit != hoverID {
             hoverID = hit
             needsDisplay = true
@@ -628,10 +719,14 @@ final class CanvasView: NSView {
         }
         switch event.keyCode {
         case 53:
+            endTextEditing(commit: false)
             host?.cancelPreview()
             dragMode = .none
             wireEnd = nil
             wireTarget = nil
+            marquee = .null
+            selection = []
+            host?.selection = []
             host?.tool = .pointer
             tool = .pointer
             needsDisplay = true
@@ -659,6 +754,16 @@ final class CanvasView: NSView {
 
     override func magnify(with event: NSEvent) {
         zoomBy(1 + event.magnification, anchorInView: convert(event.locationInWindow, from: nil))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard event.modifierFlags.contains(.command) else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let raw = event.hasPreciseScrollingDeltas ? event.scrollingDeltaY : event.scrollingDeltaY * 8
+        guard abs(raw) > 0.001 else { return }
+        zoomBy(exp(raw * 0.01), anchorInView: convert(event.locationInWindow, from: nil))
     }
 
     func nudge(dx: Double, dy: Double) {
@@ -734,18 +839,14 @@ final class CanvasView: NSView {
 
     private func hitArrow(at point: CGPoint) -> PortHit? {
         guard let id = hoverID, let item = layoutItems().first(where: { $0.id == id && !$0.is1D }) else { return nil }
-        let sides: [(CGPoint, CGPoint)] = [
-            (CGPoint(x: item.bounds.midX, y: item.bounds.minY), CGPoint(x: 0, y: -1)),
-            (CGPoint(x: item.bounds.maxX, y: item.bounds.midY), CGPoint(x: 1, y: 0)),
-            (CGPoint(x: item.bounds.midX, y: item.bounds.maxY), CGPoint(x: 0, y: 1)),
-            (CGPoint(x: item.bounds.minX, y: item.bounds.midY), CGPoint(x: -1, y: 0))
-        ]
-        for (mid, dir) in sides {
-            let tip = CGPoint(x: mid.x + dir.x * 0.22, y: mid.y + dir.y * 0.22)
-            guard hypot(tip.x - point.x, tip.y - point.y) <= 0.16 else { continue }
+        let viewPoint = pageToView(point)
+        for (mid, dir) in perimeterSides(of: item) {
+            let arrow = hoverArrowEnds(mid: mid, dir: dir)
+            let center = CGPoint(x: (arrow.tail.x + arrow.tip.x) / 2, y: (arrow.tail.y + arrow.tip.y) / 2)
+            guard hypot(center.x - viewPoint.x, center.y - viewPoint.y) <= 9 else { continue }
             let ports = ports(of: item)
             guard let port = ports.min(by: { hypot($0.anchor.x - mid.x, $0.anchor.y - mid.y) < hypot($1.anchor.x - mid.x, $1.anchor.y - mid.y) }) else { continue }
-            return PortHit(shape: item.id, index: port.index, anchor: port.anchor, knob: tip, dir: dir)
+            return PortHit(shape: item.id, index: port.index, anchor: port.anchor, knob: mid, dir: dir)
         }
         return nil
     }
@@ -764,7 +865,10 @@ final class CanvasView: NSView {
         guard var shape = diagram.pages[pageIndex].shape(id: id) else { return }
         var points = ConnectorRoute.pagePoints(shape)
         guard points.indices.contains(index) else { return }
-        if bend {
+        let style = ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value)
+        if style == .curve, points.count >= 3 {
+            points[1] = point
+        } else if bend {
             let old = points[index]
             let previous = index > 0 ? points[index - 1] : old
             let next = index + 1 < points.count ? points[index + 1] : old
@@ -787,7 +891,7 @@ final class CanvasView: NSView {
                 points[index + 1].x = point.x
             }
         }
-        ConnectorRoute.apply(points: points, to: &shape)
+        ConnectorRoute.apply(points: points, to: &shape, style: style)
         shape.id = id
         shape.setCell("UserRoute", value: "1", clearFormula: true)
         diagram.pages[pageIndex].updateShape(id: id) { $0 = shape }
@@ -798,7 +902,7 @@ final class CanvasView: NSView {
             guard let shape = page.shape(id: id) else { continue }
             for (handle, point) in handleMap(shape) {
                 let view = pageToView(point)
-                if hypot(view.x - viewPoint.x, view.y - viewPoint.y) <= 7 { return (id, handle) }
+                if abs(view.x - viewPoint.x) <= 9, abs(view.y - viewPoint.y) <= 9 { return (id, handle) }
             }
         }
         return nil
@@ -808,7 +912,7 @@ final class CanvasView: NSView {
         for id in selection.reversed() {
             guard let shape = page.shape(id: id), !shape.is1D, let corner = handleMap(shape)[.ne] else { continue }
             let knob = rotateKnob(for: corner)
-            if hypot(knob.x - viewPoint.x, knob.y - viewPoint.y) <= 9 { return id }
+            if abs(knob.x - viewPoint.x) <= 8, abs(knob.y - viewPoint.y) <= 8 { return id }
         }
         return nil
     }
@@ -907,10 +1011,11 @@ final class CanvasView: NSView {
             ConnectorRoute.apply(points: [origin, end], to: &shape)
         case .connector:
             shape = StencilCatalog.make(id: "connector", shapeId: id, center: origin)
+            let style = host?.connectorStyle ?? .elbow
             let leave = ConnectorRoute.axisDirection(from: origin, to: end)
             let arrive = ConnectorRoute.axisDirection(from: end, to: origin)
-            let points = ConnectorRoute.route(style: .elbow, start: origin, startDir: leave, end: end, endDir: arrive)
-            ConnectorRoute.apply(points: points, to: &shape)
+            let points = ConnectorRoute.route(style: style, start: origin, startDir: leave, end: end, endDir: arrive)
+            ConnectorRoute.apply(points: points, to: &shape, style: style)
         case .text:
             shape = StencilCatalog.make(id: "text", shapeId: id, center: CGPoint(x: (origin.x + end.x) / 2, y: (origin.y + end.y) / 2))
             shape.setNumber("Width", max(0.4, abs(Double(end.x - start.x))), clearFormula: true)
@@ -937,10 +1042,9 @@ final class CanvasView: NSView {
         )
         let start = begin ? point : other
         let end = begin ? other : point
-        let styleValue = Int(Format.parseDouble(shape.cell("ShapeRouteStyle")?.value) ?? 1)
-        let style: ConnectorStyle = styleValue == 0 ? .straight : .elbow
+        let style = ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value)
         let points = ConnectorRoute.route(style: style, start: start, startDir: ConnectorRoute.axisDirection(from: start, to: end), end: end, endDir: ConnectorRoute.axisDirection(from: end, to: start))
-        ConnectorRoute.apply(points: points, to: &shape)
+        ConnectorRoute.apply(points: points, to: &shape, style: style)
         shape.id = id
         diagram.pages[index].updateShape(id: id) { $0 = shape }
     }
@@ -997,7 +1101,8 @@ final class CanvasView: NSView {
                 toShape: target.shape,
                 toPort: target.index,
                 theme: diagram.theme,
-                colors: diagram.colors
+                colors: diagram.colors,
+                style: self.host?.connectorStyle ?? .elbow
             )
             self.selection = [id]
             self.host?.selection = [id]
@@ -1105,6 +1210,17 @@ final class CanvasView: NSView {
 extension CanvasView: NSTextViewDelegate {
     func textDidEndEditing(_ notification: Notification) {
         endTextEditing(commit: true)
+    }
+
+    func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
+        guard commandSelector == #selector(NSResponder.cancelOperation(_:)) else { return false }
+        endTextEditing(commit: true)
+        selection = []
+        host?.selection = []
+        host?.tool = .pointer
+        tool = .pointer
+        needsDisplay = true
+        return true
     }
 }
 

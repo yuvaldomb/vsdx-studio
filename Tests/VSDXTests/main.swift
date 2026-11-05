@@ -216,6 +216,36 @@ func testConnectorFollowsShape() {
     check(ports?.connections.count == 8, "layout exposes 8 ports")
 }
 
+func testCurveKeepsControl() {
+    var shape = StencilCatalog.make(id: "curve", shapeId: 1, center: CGPoint(x: 1, y: 1))
+    let points = ConnectorRoute.route(
+        style: .curve,
+        start: CGPoint(x: 1, y: 1),
+        startDir: CGPoint(x: 1, y: 0),
+        end: CGPoint(x: 3, y: 2),
+        endDir: CGPoint(x: 1, y: 0)
+    )
+    check(points.count == 3, "curve route has a control point")
+    ConnectorRoute.apply(points: points, to: &shape, style: .curve)
+    check(shape.geometry.first?.rows.contains { $0.type == "QuadBezTo" } == true, "curve stores a bezier")
+    let back = ConnectorRoute.pagePoints(shape)
+    check(back.count == 3, "curve reloads the control point, got \(back.count)")
+    let simple = ConnectorRoute.route(
+        style: .simple,
+        start: CGPoint(x: 0, y: 0),
+        startDir: CGPoint(x: 1, y: 0),
+        end: CGPoint(x: 2, y: 1),
+        endDir: CGPoint(x: 0, y: 1)
+    )
+    check(simple.count == 3, "simple route has one corner, got \(simple.count)")
+    if let icon = PageDrawing.renderIconPNG(page: StencilCatalog.previewPage(id: "diamond"), theme: ThemeColors(), colors: [:]) {
+        check(icon.count > 400, "diamond icon renders")
+    } else {
+        check(false, "diamond icon renders")
+    }
+}
+
+testCurveKeepsControl()
 testSnapToGrid()
 testOrthogonalConnector()
 testOutlinePorts()

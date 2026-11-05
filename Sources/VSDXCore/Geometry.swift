@@ -476,6 +476,40 @@ public enum PageDrawing {
         context.fill(CGRect(x: 0, y: 0, width: page.width, height: page.height))
         draw(page: page, theme: theme, colors: colors, in: context, pixelsPerInch: pixelsPerInch)
         guard let image = context.makeImage() else { return nil }
+        return pngData(image)
+    }
+
+    public static func renderIconPNG(page: DiagramPage, theme: ThemeColors, colors: [Int: String], pixels: Int = 96) -> Data? {
+        let items = PageLayout.items(page: page, theme: theme, colors: colors)
+        var box = CGRect.null
+        for item in items { box = box.union(item.bounds) }
+        if box.isNull || box.width < 0.02 || box.height < 0.02 {
+            box = CGRect(x: 0, y: 0, width: max(page.width, 0.4), height: max(page.height, 0.4))
+        }
+        let pad = max(0.08, max(box.width, box.height) * 0.18)
+        let side = max(box.width, box.height) + pad * 2
+        let originX = box.midX - side / 2
+        let originY = box.midY - side / 2
+        guard pixels > 8, side > 0.01, let context = CGContext(
+            data: nil,
+            width: pixels,
+            height: pixels,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: pixels, height: pixels))
+        let scale = CGFloat(pixels) / side
+        context.scaleBy(x: scale, y: scale)
+        context.translateBy(x: -originX, y: -originY)
+        draw(page: page, theme: theme, colors: colors, in: context, pixelsPerInch: max(scale / 2.2, 1))
+        guard let image = context.makeImage() else { return nil }
+        return pngData(image)
+    }
+
+    private static func pngData(_ image: CGImage) -> Data? {
         let data = NSMutableData()
         guard let dest = CGImageDestinationCreateWithData(data, UTType.png.identifier as CFString, 1, nil) else { return nil }
         CGImageDestinationAddImage(dest, image, nil)
@@ -490,6 +524,17 @@ public enum PageDrawing {
         context.saveGState()
         context.concatenate(GeometryMath.localToParent(shape, scope: scope))
         let paths = PathBuilder.localPath(shape: shape, scope: scope)
+        let shadow = Int(scope.number(shape: shape, cell: "ShdwPattern"))
+        if shadow != 0 && !paths.fill.isEmpty {
+            let dx = shape.cell("ShdwOffsetX") == nil ? 0.06 : scope.number(shape: shape, cell: "ShdwOffsetX")
+            let dy = shape.cell("ShdwOffsetY") == nil ? -0.06 : scope.number(shape: shape, cell: "ShdwOffsetY")
+            context.saveGState()
+            context.translateBy(x: dx, y: dy)
+            context.addPath(paths.fill)
+            context.setFillColor(CGColor(gray: 0, alpha: 0.28))
+            context.fillPath(using: .evenOdd)
+            context.restoreGState()
+        }
         if let imageData = shape.imagePNG, let source = CGImageSourceCreateWithData(imageData as CFData, nil), let image = CGImageSourceCreateImageAtIndex(source, 0, nil) {
             let width = scope.number(shape: shape, cell: "Width")
             let height = scope.number(shape: shape, cell: "Height")
