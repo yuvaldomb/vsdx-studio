@@ -16,6 +16,7 @@ final class ShapesPane: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = DrawioPane.chrome.cgColor
+        clipsToBounds = true
 
         let searchWell = NSView()
         searchWell.wantsLayer = true
@@ -93,20 +94,29 @@ final class ShapesPane: NSView {
             border.trailingAnchor.constraint(equalTo: trailingAnchor),
             border.topAnchor.constraint(equalTo: topAnchor),
             border.bottomAnchor.constraint(equalTo: bottomAnchor),
-            border.widthAnchor.constraint(equalToConstant: 1),
             document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
             list.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             list.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             list.topAnchor.constraint(equalTo: document.topAnchor),
-            list.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.widthAnchor)
+            list.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
+        let borderWidth = border.widthAnchor.constraint(equalToConstant: 1)
+        borderWidth.priority = .defaultHigh
+        borderWidth.isActive = true
+        let documentWidth = document.widthAnchor.constraint(equalTo: scroll.widthAnchor)
+        documentWidth.priority = .defaultHigh
+        documentWidth.isActive = true
         rebuild(query: "")
     }
 
     required init?(coder: NSCoder) { nil }
+
+    func focusSearch() {
+        guard let window else { return }
+        window.makeFirstResponder(search)
+    }
 
     deinit {
         NotificationCenter.default.removeObserver(self)

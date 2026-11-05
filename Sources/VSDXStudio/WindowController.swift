@@ -27,6 +27,8 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
     private var hRulerHeight: NSLayoutConstraint!
     private var vRulerWidth: NSLayoutConstraint!
     private var formatClipWidth: NSLayoutConstraint!
+    private var shapesWidth: NSLayoutConstraint!
+    private var shapesCollapsed = false
     private(set) var formatVisible = true
 
     var pageIndex = 0
@@ -49,6 +51,7 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
             canvas.zoom = zoom
             canvas.updateFrame()
             syncRulers()
+            ribbon.setZoomPercent(Double(zoom * 100))
         }
     }
     var snapEnabled = true
@@ -86,7 +89,11 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         build()
         canvas.host = self
         ribbon.install(target: self)
+        ribbon.onShapes = { [weak self] in self?.showShapesLibrary() }
+        ribbon.onFormat = { [weak self] in self?.toggleFormat() }
+        ribbon.onCollapse = { [weak self] in self?.toggleShapesPane() }
         ribbon.update(tool: .pointer)
+        ribbon.setZoomPercent(Double(zoom * 100))
         shapesPane.onPlace = { [weak self] id in self?.placeShapeForTest(id) }
         formatPane.onChange = { [weak self] change in self?.apply(change) }
         formatPane.onToggleGrid = { [weak self] on in
@@ -215,14 +222,15 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         split.addArrangedSubview(shapesPane)
         split.addArrangedSubview(canvasColumn)
         split.addArrangedSubview(formatClip)
-        shapesPane.widthAnchor.constraint(equalToConstant: 232).isActive = true
+        shapesWidth = shapesPane.widthAnchor.constraint(equalToConstant: 232)
+        shapesWidth.isActive = true
         scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
         canvasColumn.setContentHuggingPriority(.defaultLow, for: .horizontal)
         canvasColumn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         scroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
-        split.setHoldingPriority(NSLayoutConstraint.Priority(50), forSubviewAt: 1)
-        split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 2)
+        split.setHoldingPriority(NSLayoutConstraint.Priority(rawValue: 260), forSubviewAt: 0)
+        split.setHoldingPriority(NSLayoutConstraint.Priority(rawValue: 50), forSubviewAt: 1)
+        split.setHoldingPriority(NSLayoutConstraint.Priority(rawValue: 260), forSubviewAt: 2)
 
         content.addSubview(ribbon)
         content.addSubview(split)
@@ -240,15 +248,38 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
             pageWrap.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             pageWrap.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
+        applyRulers()
         layoutSplit()
     }
 
     private func layoutSplit() {
+        let shapes: CGFloat = shapesCollapsed ? 0 : 232
+        shapesWidth?.constant = shapes
         let width = split.bounds.width
         guard width > 700 else { return }
         let format: CGFloat = formatVisible ? 240 : 0
-        split.setPosition(232, ofDividerAt: 0)
+        split.setPosition(shapes, ofDividerAt: 0)
         split.setPosition(width - format, ofDividerAt: 1)
+    }
+
+    private func showShapesLibrary() {
+        if shapesCollapsed {
+            setShapesCollapsed(false)
+        } else {
+            shapesPane.focusSearch()
+        }
+    }
+
+    private func toggleShapesPane() {
+        setShapesCollapsed(!shapesCollapsed)
+    }
+
+    private func setShapesCollapsed(_ collapsed: Bool) {
+        shapesCollapsed = collapsed
+        shapesWidth.constant = collapsed ? 0 : 232
+        shapesPane.isHidden = collapsed
+        split.layoutSubtreeIfNeeded()
+        layoutSplit()
     }
 
     private func applyFormatVisibility() {
@@ -282,6 +313,12 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         canvas.snapEnabled = snapEnabled
         canvas.showConnections = showConnections
         window?.title = (studioDocument.displayName as String?) ?? page.name
+        ribbon.setDocumentTitle(window?.title ?? page.name)
+        if studioDocument.isDocumentEdited {
+            ribbon.setStatus("Unsaved changes. Click here to save.")
+        } else {
+            ribbon.setStatus(nil)
+        }
         rebuildPageBar()
         if rebuildPanels { showFormat() }
         syncRulers()
@@ -639,12 +676,12 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
     @objc func zoomActual(_ sender: Any?) { zoom = 1 }
     @objc func zoomFit(_ sender: Any?) {
         let visible = scroll.contentView.bounds.size
-        let unit = canvas.pixelsPerInch / max(canvas.zoom, 0.001)
         let page = currentPage()
-        guard page.width > 0, page.height > 0, unit > 0 else { return }
+        let pixelsPerInch = canvas.pixelsPerInch / max(canvas.zoom, 0.001)
+        guard page.width > 0, page.height > 0, pixelsPerInch > 0 else { return }
         let fit = min(
-            (visible.width - 80) / CGFloat(page.width) / unit,
-            (visible.height - 80) / CGFloat(page.height) / unit
+            (visible.width - 80) / (CGFloat(page.width) * pixelsPerInch),
+            (visible.height - 80) / (CGFloat(page.height) * pixelsPerInch)
         )
         zoom = min(4, max(0.15, fit))
     }
@@ -780,7 +817,7 @@ private final class PageTabButton: NSButton {
 
 final class RulerView: NSView {
     var horizontal: Bool
-    var pixelsPerInch: CGFloat = 72
+    var pixelsPerInch: CGFloat = 100
     var zeroOffset: CGFloat = 48
     var scaleDirection: CGFloat = 1
     var marker: CGFloat?

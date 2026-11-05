@@ -44,7 +44,7 @@ final class RibbonBar: NSView {
         titleLabel.maximumNumberOfLines = 1
         titleLabel.cell?.lineBreakMode = .byTruncatingTail
         titleLabel.cell?.truncatesLastVisibleLine = true
-        titleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(700), for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 700), for: .horizontal)
         titleLabel.setContentHuggingPriority(.required, for: .horizontal)
         titleLabel.translatesAutoresizingMaskIntoConstraints = false
         zoomButton.setLabel("100%", size: 14, weight: .regular, monospaced: true)
@@ -56,11 +56,12 @@ final class RibbonBar: NSView {
     required init?(coder: NSCoder) { nil }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: 98)
+        NSSize(width: NSView.noIntrinsicMetric, height: 102)
     }
 
     func install(target: AnyObject) {
         actionTarget = target
+        statusPill.onClick = { [weak self] in self?.saveFromStatus() }
         guard !didInstall else { return }
         didInstall = true
 
@@ -76,7 +77,7 @@ final class RibbonBar: NSView {
             toolRow.leadingAnchor.constraint(equalTo: leadingAnchor),
             toolRow.trailingAnchor.constraint(equalTo: trailingAnchor),
             toolRow.topAnchor.constraint(equalTo: menuRow.bottomAnchor),
-            toolRow.heightAnchor.constraint(equalToConstant: 38)
+            toolRow.heightAnchor.constraint(equalToConstant: 42)
         ])
 
         let mark = AppMark()
@@ -87,7 +88,7 @@ final class RibbonBar: NSView {
         menuCluster.setContentCompressionResistancePriority(.required, for: .horizontal)
         let cluster = horizontalStack([brand, menuCluster, statusPill], spacing: 12)
         cluster.setContentHuggingPriority(.required, for: .horizontal)
-        cluster.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(750), for: .horizontal)
+        cluster.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(rawValue: 750), for: .horizontal)
 
         let share = ChromeButton(kind: .share)
         share.setLabel("Share", size: 14, weight: .semibold)
@@ -527,6 +528,19 @@ final class RibbonBar: NSView {
         }
     }
 
+    private func saveFromStatus() {
+        let selector = #selector(NSDocument.save(_:))
+        if let controller = actionTarget as? NSWindowController, let document = controller.document {
+            document.save(self)
+            return
+        }
+        if let actionTarget, actionTarget.responds(to: selector) {
+            _ = NSApp.sendAction(selector, to: actionTarget, from: self)
+            return
+        }
+        _ = NSApp.sendAction(selector, to: nil, from: self)
+    }
+
     @objc private func shapesClicked(_ sender: Any?) {
         onShapes?()
     }
@@ -623,6 +637,7 @@ private final class AppMark: NSView {
 
 private final class StatusPill: NSView {
     let label = NSTextField(labelWithString: "")
+    var onClick: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -631,6 +646,8 @@ private final class StatusPill: NSView {
         layer?.masksToBounds = true
         label.font = NSFont.systemFont(ofSize: 12)
         label.textColor = DiagramBarColor.statusText
+        label.isSelectable = false
+        label.cell?.refusesFirstResponder = true
         label.translatesAutoresizingMaskIntoConstraints = false
         label.setContentHuggingPriority(.required, for: .horizontal)
         label.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -652,6 +669,21 @@ private final class StatusPill: NSView {
     override func layout() {
         super.layout()
         layer?.cornerRadius = bounds.height / 2
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard !isHidden else { return nil }
+        return bounds.contains(convert(point, from: superview)) ? self : nil
+    }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {}
+
+    override func mouseUp(with event: NSEvent) {
+        let local = convert(event.locationInWindow, from: nil)
+        guard bounds.contains(local) else { return }
+        onClick?()
     }
 }
 
