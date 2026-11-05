@@ -65,6 +65,13 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
             formatPane.showsGrid = showGrid
         }
     }
+    var showHoverArrows = true {
+        didSet {
+            canvas.showHoverArrows = showHoverArrows
+            canvas.needsDisplay = true
+            formatPane.showsConnectionArrows = showHoverArrows
+        }
+    }
     var showConnections = false {
         didSet {
             canvas.showConnections = showConnections
@@ -106,6 +113,10 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         formatPane.onToggleConnectionPoints = { [weak self] on in
             guard let self, self.showConnections != on else { return }
             self.toggleConnections(nil)
+        }
+        formatPane.onToggleConnectionArrows = { [weak self] on in
+            guard let self else { return }
+            self.showHoverArrows = on
         }
         syncFromDocument(rebuildPanels: true)
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens.first
@@ -331,6 +342,7 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         let shape = selection.last.flatMap { diagram.pages[pageIndex].shape(id: $0) }
         formatPane.showsGrid = showGrid
         formatPane.showsConnectionPoints = showConnections
+        formatPane.showsConnectionArrows = showHoverArrows
         formatPane.show(shape: shape)
     }
 
@@ -513,6 +525,10 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
                 DiagramEdit.order(page: &diagram.pages[index], ids: ids, kind: .front)
             case .sendBack:
                 DiagramEdit.order(page: &diagram.pages[index], ids: ids, kind: .back)
+            case .quickStyle(let fill, let line, let text):
+                DiagramEdit.setFill(page: &diagram.pages[index], ids: ids, color: fill)
+                DiagramEdit.setLine(page: &diagram.pages[index], ids: ids, color: line)
+                DiagramEdit.setFont(page: &diagram.pages[index], ids: ids, color: text)
             }
         }
     }

@@ -5,6 +5,8 @@ private enum DrawioPane {
     static let chrome = NSColor(srgbRed: 241.0 / 255, green: 243.0 / 255, blue: 244.0 / 255, alpha: 1)
     static let line = NSColor(srgbRed: 218.0 / 255, green: 218.0 / 255, blue: 218.0 / 255, alpha: 1)
     static let more = NSColor(srgbRed: 194.0 / 255, green: 231.0 / 255, blue: 255.0 / 255, alpha: 1)
+    static let ink = NSColor(srgbRed: 63.0 / 255, green: 63.0 / 255, blue: 63.0 / 255, alpha: 1)
+    static let tabIdle = NSColor(srgbRed: 228.0 / 255, green: 228.0 / 255, blue: 228.0 / 255, alpha: 1)
 }
 
 final class ShapesPane: NSView {
@@ -244,6 +246,7 @@ final class FormatPane: NSView {
     var onChange: ((FormatChange) -> Void)?
     var onToggleGrid: ((Bool) -> Void)?
     var onToggleConnectionPoints: ((Bool) -> Void)?
+    var onToggleConnectionArrows: ((Bool) -> Void)?
 
     private let diagramStack = NSStackView()
     private let tabRow = NSStackView()
@@ -252,6 +255,7 @@ final class FormatPane: NSView {
     private let arrangeStack = NSStackView()
     private var tabButtons: [TextTabButton] = []
     private var formatTab = 0
+    private weak var scroller: NSScrollView?
 
     private let gridCheck: NSButton = {
         let button = NSButton(checkboxWithTitle: "Grid", target: nil, action: nil)
@@ -265,6 +269,14 @@ final class FormatPane: NSView {
         button.state = .off
         return button
     }()
+    private let arrowsCheck: NSButton = {
+        let button = NSButton(checkboxWithTitle: "Connection Arrows", target: nil, action: nil)
+        button.font = NSFont.systemFont(ofSize: 12)
+        button.state = .on
+        return button
+    }()
+    private let fillCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let lineCheck = NSButton(checkboxWithTitle: "", target: nil, action: nil)
 
     private let xField = NSTextField()
     private let yField = NSTextField()
@@ -298,6 +310,9 @@ final class FormatPane: NSView {
     var showsConnectionPoints = false {
         didSet { pointsCheck.state = showsConnectionPoints ? .on : .off }
     }
+    var showsConnectionArrows = true {
+        didSet { arrowsCheck.state = showsConnectionArrows ? .on : .off }
+    }
 
     enum FormatChange {
         case position(x: Double?, y: Double?, w: Double?, h: Double?, angle: Double?)
@@ -320,6 +335,7 @@ final class FormatPane: NSView {
         case route(ConnectorStyle)
         case bringFront
         case sendBack
+        case quickStyle(fill: String, line: String, text: String)
     }
 
     override init(frame frameRect: NSRect) {
@@ -331,6 +347,12 @@ final class FormatPane: NSView {
         gridCheck.action = #selector(gridClicked)
         pointsCheck.target = self
         pointsCheck.action = #selector(pointsClicked)
+        arrowsCheck.target = self
+        arrowsCheck.action = #selector(arrowsClicked)
+        fillCheck.target = self
+        fillCheck.action = #selector(commitFillCheck)
+        lineCheck.target = self
+        lineCheck.action = #selector(commitLineCheck)
 
         configure(diagramStack)
         diagramStack.addArrangedSubview(section("Diagram"))
@@ -343,14 +365,14 @@ final class FormatPane: NSView {
         gridRow.spacing = 8
         diagramStack.addArrangedSubview(gridRow)
         diagramStack.addArrangedSubview(bodyLabel("Page View"))
-        diagramStack.addArrangedSubview(option("Connection Arrows", on: true))
+        diagramStack.addArrangedSubview(arrowsCheck)
         diagramStack.addArrangedSubview(pointsCheck)
         diagramStack.addArrangedSubview(option("Guides", on: true))
 
         tabRow.orientation = .horizontal
         tabRow.alignment = .centerY
-        tabRow.spacing = 2
-        tabRow.distribution = .gravityAreas
+        tabRow.spacing = 0
+        tabRow.distribution = .fillEqually
         tabRow.translatesAutoresizingMaskIntoConstraints = false
         for (index, title) in ["Style", "Text", "Arrange"].enumerated() {
             let button = TextTabButton()
@@ -359,10 +381,12 @@ final class FormatPane: NSView {
             button.target = self
             button.action = #selector(selectFormatTab(_:))
             button.isBordered = false
+            button.setButtonType(.momentaryChange)
+            button.focusRingType = .none
             button.wantsLayer = true
             button.translatesAutoresizingMaskIntoConstraints = false
-            button.widthAnchor.constraint(equalToConstant: 64).isActive = true
-            button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            button.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            button.heightAnchor.constraint(equalToConstant: 34).isActive = true
             tabButtons.append(button)
             tabRow.addArrangedSubview(button)
         }
@@ -403,8 +427,9 @@ final class FormatPane: NSView {
         shadowCheck.font = NSFont.systemFont(ofSize: 12)
         shadowCheck.target = self
         shadowCheck.action = #selector(commitShadow)
-        styleStack.addArrangedSubview(labeled("Fill", fillWell))
-        styleStack.addArrangedSubview(labeled("Line", lineWell))
+        styleStack.addArrangedSubview(presetRow())
+        styleStack.addArrangedSubview(labeled("Fill", fillControl(fillCheck, fillWell)))
+        styleStack.addArrangedSubview(labeled("Line", fillControl(lineCheck, lineWell)))
         styleStack.addArrangedSubview(labeled("Weight", weight))
         styleStack.addArrangedSubview(labeled("Pattern", pattern))
         styleStack.addArrangedSubview(labeled("Route", route))
@@ -477,51 +502,105 @@ final class FormatPane: NSView {
 
         let stack = NSStackView()
         configure(stack)
-        stack.edgeInsets = NSEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
-        stack.spacing = 10
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 10, bottom: 16, right: 10)
+        stack.spacing = 8
         stack.addArrangedSubview(diagramStack)
-        stack.addArrangedSubview(tabRow)
         stack.addArrangedSubview(styleStack)
         stack.addArrangedSubview(textStack)
         stack.addArrangedSubview(arrangeStack)
+
+        let tabBar = NSView()
+        tabBar.wantsLayer = true
+        tabBar.layer?.backgroundColor = DrawioPane.tabIdle.cgColor
+        tabBar.translatesAutoresizingMaskIntoConstraints = false
+        let tabLine = NSView()
+        tabLine.wantsLayer = true
+        tabLine.layer?.backgroundColor = DrawioPane.line.cgColor
+        tabLine.translatesAutoresizingMaskIntoConstraints = false
+        tabBar.addSubview(tabLine)
+        tabBar.addSubview(tabRow)
 
         let scroll = NSScrollView()
         scroll.drawsBackground = true
         scroll.backgroundColor = .white
         scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
         scroll.scrollerStyle = .overlay
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        let document = NSView()
+        let document = FlippedPane()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
         scroll.documentView = document
+        scroller = scroll
 
         let border = NSView()
         border.wantsLayer = true
         border.layer?.backgroundColor = DrawioPane.line.cgColor
         border.translatesAutoresizingMaskIntoConstraints = false
 
+        addSubview(tabBar)
         addSubview(scroll)
         addSubview(border)
         NSLayoutConstraint.activate([
+            tabBar.leadingAnchor.constraint(equalTo: leadingAnchor),
+            tabBar.trailingAnchor.constraint(equalTo: trailingAnchor),
+            tabBar.topAnchor.constraint(equalTo: topAnchor),
+            tabBar.heightAnchor.constraint(equalToConstant: 34),
+            tabRow.leadingAnchor.constraint(equalTo: tabBar.leadingAnchor),
+            tabRow.trailingAnchor.constraint(equalTo: tabBar.trailingAnchor),
+            tabRow.topAnchor.constraint(equalTo: tabBar.topAnchor),
+            tabRow.bottomAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            tabLine.leadingAnchor.constraint(equalTo: tabBar.leadingAnchor),
+            tabLine.trailingAnchor.constraint(equalTo: tabBar.trailingAnchor),
+            tabLine.bottomAnchor.constraint(equalTo: tabBar.bottomAnchor),
+            tabLine.heightAnchor.constraint(equalToConstant: 1),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: topAnchor),
+            scroll.topAnchor.constraint(equalTo: tabBar.bottomAnchor),
             scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
             document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             stack.leadingAnchor.constraint(equalTo: document.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             stack.topAnchor.constraint(equalTo: document.topAnchor),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
             border.leadingAnchor.constraint(equalTo: leadingAnchor),
             border.topAnchor.constraint(equalTo: topAnchor),
             border.bottomAnchor.constraint(equalTo: bottomAnchor),
             border.widthAnchor.constraint(equalToConstant: 1)
         ])
+        document.setContentHuggingPriority(.required, for: .vertical)
+        document.setContentCompressionResistancePriority(.required, for: .vertical)
+        for field in [xField, yField, wField, hField, angleField, dataLabel, dataValue] {
+            NotificationCenter.default.addObserver(self, selector: #selector(fieldEnded(_:)), name: NSControl.textDidEndEditingNotification, object: field)
+        }
+        fillRows(diagramStack)
+        fillRows(styleStack)
+        fillRows(textStack)
+        fillRows(arrangeStack)
         applyMode(hasShape: false)
+    }
+
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        DispatchQueue.main.async { [weak self] in
+            self?.showTop()
+        }
+    }
+
+    private func showTop() {
+        guard let scroll = scroller, let document = scroll.documentView else { return }
+        scroll.layoutSubtreeIfNeeded()
+        let visible = scroll.contentView.bounds.height
+        let top = document.isFlipped ? 0 : max(0, document.bounds.height - visible)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: top))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     required init?(coder: NSCoder) { nil }
@@ -533,6 +612,7 @@ final class FormatPane: NSView {
         if shape != nil && !same { formatTab = 0 }
         shapeID = shape?.id
         applyMode(hasShape: shape != nil)
+        if !same { showTop() }
         guard let shape else {
             [xField, yField, wField, hField, angleField].forEach { $0.stringValue = "" }
             return
@@ -545,6 +625,9 @@ final class FormatPane: NSView {
         angleField.stringValue = String(format: "%.1f", degrees)
         fillWell.color = NSColor(hex: shape.cell("FillForegnd")?.value ?? "#FFFFFF") ?? .white
         lineWell.color = NSColor(hex: shape.cell("LineColor")?.value ?? "#000000") ?? .black
+        fillCheck.state = shape.cell("FillPattern")?.value == "0" ? .off : .on
+        let linePattern = Int(Format.parseDouble(shape.cell("LinePattern")?.value) ?? 1)
+        lineCheck.state = linePattern == 0 ? .off : .on
         let font = shape.character.first?.raw("Font") ?? "Calibri"
         if fontName.itemTitles.contains(font) { fontName.selectItem(withTitle: font) }
         let points = (Format.parseDouble(shape.character.first?.raw("Size")) ?? 12.0 / 72.0) * 72
@@ -581,11 +664,12 @@ final class FormatPane: NSView {
 
     private func applyMode(hasShape: Bool) {
         diagramStack.isHidden = hasShape
-        tabRow.isHidden = !hasShape
+        tabRow.isHidden = false
         guard hasShape else {
             styleStack.isHidden = true
             textStack.isHidden = true
             arrangeStack.isHidden = true
+            for button in tabButtons { button.chosen = false }
             return
         }
         showFormatTab(formatTab)
@@ -602,20 +686,55 @@ final class FormatPane: NSView {
     }
 
     @objc private func selectFormatTab(_ sender: NSButton) {
+        if shapeID == nil, sender.tag == formatTab, !styleStack.isHidden || !textStack.isHidden || !arrangeStack.isHidden {
+            applyMode(hasShape: false)
+            showTop()
+            return
+        }
         showFormatTab(sender.tag)
+        diagramStack.isHidden = true
+        showTop()
     }
 
     @objc private func gridClicked() { onToggleGrid?(gridCheck.state == .on) }
     @objc private func pointsClicked() { onToggleConnectionPoints?(pointsCheck.state == .on) }
+    @objc private func arrowsClicked() { onToggleConnectionArrows?(arrowsCheck.state == .on) }
+
+    @objc private func fieldEnded(_ note: Notification) {
+        guard let field = note.object as? NSTextField else { return }
+        if field === dataLabel || field === dataValue {
+            commitData()
+        } else {
+            commitPosition()
+        }
+    }
 
     @objc private func commitPosition() {
-        onChange?(.position(
+        emit(.position(
             x: Double(xField.stringValue),
             y: Double(yField.stringValue),
             w: Double(wField.stringValue),
             h: Double(hField.stringValue),
             angle: Double(angleField.stringValue).map { $0 * .pi / 180 }
         ))
+    }
+
+    @objc private func commitFillCheck() {
+        if fillCheck.state == .on {
+            emit(.fill(fillWell.color))
+        } else {
+            emit(.fill(nil))
+        }
+    }
+
+    @objc private func commitLineCheck() {
+        emit(.pattern(lineCheck.state == .on ? 1 : 0))
+    }
+
+    @objc private func commitPreset(_ sender: NSButton) {
+        let index = max(0, min(quickStyles.count - 1, sender.tag))
+        let style = quickStyles[index]
+        emit(.quickStyle(fill: style.fill, line: style.line, text: style.text))
     }
 
     @objc private func commitFill() { onChange?(.fill(fillWell.color)) }
@@ -696,10 +815,63 @@ final class FormatPane: NSView {
         return row
     }
 
+    private func fillRows(_ stack: NSStackView) {
+        for view in stack.arrangedSubviews {
+            let pin = view.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            pin.priority = NSLayoutConstraint.Priority(750)
+            pin.isActive = true
+        }
+    }
+
     private func configure(_ stack: NSStackView) {
         stack.orientation = .vertical
         stack.alignment = .leading
+        stack.distribution = .fill
         stack.spacing = 8
+        stack.detachesHiddenViews = false
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.setContentHuggingPriority(.required, for: .vertical)
+        stack.setContentCompressionResistancePriority(.required, for: .vertical)
+    }
+
+    private func presetRow() -> NSView {
+        var swatches: [NSView] = []
+        for (index, style) in quickStyles.prefix(8).enumerated() {
+            let button = SwatchButton()
+            button.swatch = NSColor(hex: style.fill) ?? .white
+            button.stroke = NSColor(hex: style.line) ?? .black
+            button.tag = index
+            button.target = self
+            button.action = #selector(commitPreset(_:))
+            button.toolTip = "Style"
+            button.isBordered = false
+            button.setButtonType(.momentaryChange)
+            button.focusRingType = .none
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 16).isActive = true
+            swatches.append(button)
+        }
+        let row = NSStackView(views: swatches)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 4
+        row.detachesHiddenViews = false
+        return row
+    }
+
+    private func fillControl(_ check: NSButton, _ well: NSColorWell) -> NSView {
+        check.translatesAutoresizingMaskIntoConstraints = false
+        check.setContentHuggingPriority(.required, for: .horizontal)
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.widthAnchor.constraint(equalToConstant: 36).isActive = true
+        well.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        let row = NSStackView(views: [check, well])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 6
+        row.detachesHiddenViews = false
+        return row
     }
 
     private func section(_ title: String) -> NSTextField {
@@ -726,20 +898,49 @@ final class FormatPane: NSView {
     private func labeled(_ title: String, _ control: NSView) -> NSView {
         let label = NSTextField(labelWithString: title)
         label.font = NSFont.systemFont(ofSize: 12)
-        label.textColor = .black
+        label.textColor = DrawioPane.ink
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.widthAnchor.constraint(equalToConstant: 52).isActive = true
-        control.translatesAutoresizingMaskIntoConstraints = false
-        if control is NSTextField || control is NSPopUpButton {
-            let width = control.widthAnchor.constraint(equalToConstant: 136)
-            width.priority = .defaultHigh
-            width.isActive = true
-        }
+        label.setContentHuggingPriority(.required, for: .horizontal)
+        label.widthAnchor.constraint(equalToConstant: 72).isActive = true
+        styleControl(control)
+        control.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        control.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         let row = NSStackView(views: [label, control])
         row.orientation = .horizontal
         row.alignment = .centerY
+        row.distribution = .fill
         row.spacing = 6
+        row.detachesHiddenViews = false
+        row.translatesAutoresizingMaskIntoConstraints = false
+        row.heightAnchor.constraint(greaterThanOrEqualToConstant: 24).isActive = true
         return row
+    }
+
+    private func styleControl(_ control: NSView) {
+        control.translatesAutoresizingMaskIntoConstraints = false
+        if let field = control as? NSTextField, field.isEditable {
+            field.isBezeled = true
+            field.bezelStyle = .squareBezel
+            field.drawsBackground = true
+            field.backgroundColor = .white
+            field.textColor = DrawioPane.ink
+            field.focusRingType = .none
+            field.font = NSFont.systemFont(ofSize: 12)
+            field.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        }
+        if let popup = control as? NSPopUpButton {
+            popup.controlSize = .small
+            popup.font = NSFont.systemFont(ofSize: 12)
+            popup.heightAnchor.constraint(equalToConstant: 22).isActive = true
+            popup.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        }
+        if let field = control as? NSTextField, field.isEditable {
+            field.widthAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        }
+        if let well = control as? NSColorWell {
+            well.widthAnchor.constraint(equalToConstant: 36).isActive = true
+            well.heightAnchor.constraint(equalToConstant: 18).isActive = true
+        }
     }
 }
 
@@ -771,18 +972,45 @@ private final class TextTabButton: NSButton {
     override var wantsUpdateLayer: Bool { false }
 
     override func draw(_ dirtyRect: NSRect) {
-        let font = NSFont.systemFont(ofSize: 12, weight: chosen ? .bold : .regular)
+        if chosen {
+            NSColor.white.setFill()
+        } else {
+            DrawioPane.tabIdle.setFill()
+        }
+        bounds.fill()
+        if !chosen {
+            DrawioPane.line.setFill()
+            NSRect(x: 0, y: 0, width: bounds.width, height: 1).fill()
+        }
+        let font = NSFont.systemFont(ofSize: 13, weight: .medium)
         let attrs: [NSAttributedString.Key: Any] = [
             .font: font,
-            .foregroundColor: chosen ? NSColor.black : NSColor(white: 0.35, alpha: 1)
+            .foregroundColor: DrawioPane.ink
         ]
         let text = title as NSString
         let size = text.size(withAttributes: attrs)
         let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
         text.draw(at: origin, withAttributes: attrs)
-        if chosen {
-            NSColor.black.setFill()
-            NSRect(x: 6, y: 1, width: max(0, bounds.width - 12), height: 2).fill()
-        }
     }
+}
+
+private final class SwatchButton: NSButton {
+    var swatch: NSColor = .white
+    var stroke: NSColor = .black
+
+    override var wantsUpdateLayer: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let rect = bounds.insetBy(dx: 0.5, dy: 0.5)
+        let path = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
+        swatch.setFill()
+        path.fill()
+        stroke.setStroke()
+        path.lineWidth = 1
+        path.stroke()
+    }
+}
+
+private final class FlippedPane: NSView {
+    override var isFlipped: Bool { true }
 }

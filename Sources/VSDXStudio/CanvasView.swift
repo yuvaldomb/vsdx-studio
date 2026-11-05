@@ -27,6 +27,7 @@ final class CanvasView: NSView {
     var tool: EditorTool = .pointer
     var showGrid = true
     var showConnections = true
+    var showHoverArrows = true
     var snapEnabled = true
     var zoom: CGFloat = 1
     var guides: [GuideLine] = []
@@ -277,7 +278,7 @@ final class CanvasView: NSView {
     }
 
     private func drawHoverArrows() {
-        guard tool == .pointer, !isWiring, let id = hoverID, let item = layoutItems().first(where: { $0.id == id && !$0.is1D }) else { return }
+        guard showHoverArrows, tool == .pointer, !isWiring, let id = hoverID, let item = layoutItems().first(where: { $0.id == id && !$0.is1D }) else { return }
         for (mid, dir) in perimeterSides(of: item) {
             let arrow = hoverArrowEnds(mid: mid, dir: dir)
             drawHoverArrow(tip: arrow.tip, from: arrow.tail)
