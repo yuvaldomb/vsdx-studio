@@ -519,11 +519,11 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
 
     private func currentPage() -> DiagramPage { diagram.pages[pageIndex] }
 
-    @objc override func undo(_ sender: Any?) {
+    @objc func undo(_ sender: Any?) {
         studioDocument.undoManager?.undo()
     }
 
-    @objc override func redo(_ sender: Any?) {
+    @objc func redo(_ sender: Any?) {
         studioDocument.undoManager?.redo()
     }
 
@@ -603,9 +603,13 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         let shape = selection.last.flatMap { currentPage().shape(id: $0) }
         let hex = fill ? (shape?.cell("FillForegnd")?.value ?? "#FFFFFF") : (shape?.cell("LineColor")?.value ?? "#000000")
         panel.color = NSColor(hex: hex) ?? (fill ? .white : .black)
-        panel.target = self
-        panel.action = #selector(colorPicked(_:))
+        window?.makeFirstResponder(nil)
         panel.orderFront(sender)
+    }
+
+    @objc func changeColor(_ sender: NSColorPanel?) {
+        guard let sender else { return }
+        colorPicked(sender)
     }
 
     @objc private func colorPicked(_ panel: NSColorPanel) {

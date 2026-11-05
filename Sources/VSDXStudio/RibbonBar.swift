@@ -545,7 +545,7 @@ final class RibbonBar: NSView {
 
     private func saveFromStatus() {
         let selector = #selector(NSDocument.save(_:))
-        if let controller = actionTarget as? NSWindowController, let document = controller.document {
+        if let controller = actionTarget as? NSWindowController, let document = controller.document as? NSDocument {
             document.save(self)
             return
         }
@@ -865,7 +865,9 @@ private final class ChromeButtonCell: NSButtonCell {
         super.init(textCell: string)
     }
 
-    required init?(coder: NSCoder) { nil }
+    required init(coder: NSCoder) {
+        super.init(coder: coder)
+    }
 
     override func draw(withFrame frame: NSRect, in controlView: NSView) {
         let fill = isHovered ? hoverFill : baseFill

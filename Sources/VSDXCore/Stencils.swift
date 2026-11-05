@@ -331,11 +331,11 @@ public enum ConnectorRoute {
             if row.type == "QuadBezTo" || row.type == "RelQuadBezTo" {
                 let ax = Format.parseDouble(row.raw("A")) ?? 0
                 let ay = Format.parseDouble(row.raw("B")) ?? 0
-                result.append(map(ax, ay, relative))
+                result.append(map(ax, ay, relative: relative))
             }
             let x = Format.parseDouble(row.raw("X")) ?? 0
             let y = Format.parseDouble(row.raw("Y")) ?? 0
-            result.append(map(x, y, relative))
+            result.append(map(x, y, relative: relative))
         }
         return result
     }
