@@ -30,6 +30,9 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
     private var shapesWidth: NSLayoutConstraint!
     private var shapesCollapsed = false
     private(set) var formatVisible = true
+    var connectorStyle: ConnectorStyle = .elbow
+    private var pickingFill = true
+    private weak var colorButton: NSButton?
 
     var pageIndex = 0
     var selection: [Int] = [] {
@@ -483,11 +486,140 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
                         shape.original = nil
                     }
                 }
+            case .opacity(let fraction):
+                DiagramEdit.setOpacity(page: &diagram.pages[index], ids: ids, fraction: fraction)
+            case .shadow(let enabled):
+                DiagramEdit.setShadow(page: &diagram.pages[index], ids: ids, enabled: enabled)
+            case .rounding(let inches):
+                DiagramEdit.setRounding(page: &diagram.pages[index], ids: ids, inches: inches)
+            case .beginArrow(let value):
+                DiagramEdit.setLine(page: &diagram.pages[index], ids: ids, beginArrow: value)
+            case .fontBit(let bit):
+                DiagramEdit.toggleFontBit(page: &diagram.pages[index], ids: ids, bit: bit)
+            case .textAlign(let align):
+                DiagramEdit.setFont(page: &diagram.pages[index], ids: ids, align: align)
+            case .verticalAlign(let align):
+                DiagramEdit.setFont(page: &diagram.pages[index], ids: ids, vertical: align)
+            case .route(let style):
+                self.connectorStyle = style
+                for id in ids {
+                    guard var shape = diagram.pages[index].shape(id: id), shape.is1D else { continue }
+                    shape.setCell("UserRoute", value: "0", clearFormula: true)
+                    shape.setCell("ShapeRouteStyle", value: style.routeValue, clearFormula: true)
+                    diagram.pages[index].updateShape(id: id) { $0 = shape }
+                }
+                DiagramEdit.resetRoutes(page: &diagram.pages[index], ids: ids, theme: diagram.theme, colors: diagram.colors)
+            case .bringFront:
+                DiagramEdit.order(page: &diagram.pages[index], ids: ids, kind: .front)
+            case .sendBack:
+                DiagramEdit.order(page: &diagram.pages[index], ids: ids, kind: .back)
             }
         }
     }
 
     private func currentPage() -> DiagramPage { diagram.pages[pageIndex] }
+
+    @objc override func undo(_ sender: Any?) {
+        studioDocument.undoManager?.undo()
+    }
+
+    @objc override func redo(_ sender: Any?) {
+        studioDocument.undoManager?.redo()
+    }
+
+    @objc func toggleFullScreen(_ sender: Any?) {
+        window?.toggleFullScreen(sender)
+    }
+
+    @objc func toggleShadow(_ sender: Any?) {
+        let ids = Set(selection)
+        guard !ids.isEmpty else { return }
+        let enable = ids.contains { id in
+            let pattern = Format.parseDouble(currentPage().shape(id: id)?.cell("ShdwPattern")?.value) ?? 0
+            return pattern == 0
+        }
+        studioDocument.mutate("Shadow") { diagram in
+            DiagramEdit.setShadow(page: &diagram.pages[self.pageIndex], ids: ids, enabled: enable)
+        }
+    }
+
+    @objc func pickFill(_ sender: Any?) { beginColorPick(fill: true, sender: sender) }
+    @objc func pickStroke(_ sender: Any?) { beginColorPick(fill: false, sender: sender) }
+
+    @objc func chooseConnectorStyle(_ sender: NSMenuItem) {
+        switch sender.tag {
+        case 0: connectorStyle = .straight
+        case 2: connectorStyle = .curve
+        case 3: connectorStyle = .simple
+        default: connectorStyle = .elbow
+        }
+        tool = .connector
+    }
+
+    @objc func clearWaypoints(_ sender: Any?) {
+        let ids = Set(selection)
+        guard !ids.isEmpty else { return }
+        studioDocument.mutate("Clear Waypoints") { diagram in
+            DiagramEdit.resetRoutes(page: &diagram.pages[self.pageIndex], ids: ids, theme: diagram.theme, colors: diagram.colors)
+        }
+    }
+
+    @objc func insertTable(_ sender: Any?) {
+        studioDocument.mutate("Insert Table") { diagram in
+            let index = self.pageIndex
+            let page = diagram.pages[index]
+            let originX = page.width / 2 - 1.8
+            let originY = page.height / 2 - 0.9
+            var ids: [Int] = []
+            for row in 0..<3 {
+                for column in 0..<3 {
+                    let id = diagram.pages[index].nextShapeId()
+                    let center = CGPoint(
+                        x: originX + Double(column) * 1.2 + 0.6,
+                        y: originY + Double(row) * 0.6 + 0.3
+                    )
+                    var shape = StencilCatalog.make(id: "rectangle", shapeId: id, center: center)
+                    shape.setNumber("Width", 1.2, clearFormula: true)
+                    shape.setNumber("Height", 0.6, clearFormula: true)
+                    shape.setTextContent("")
+                    diagram.pages[index].shapes.append(shape)
+                    ids.append(id)
+                }
+            }
+            if let group = DiagramEdit.group(page: &diagram.pages[index], ids: ids, theme: diagram.theme, colors: diagram.colors) {
+                self.selection = [group]
+            } else {
+                self.selection = ids
+            }
+        }
+    }
+
+    private func beginColorPick(fill: Bool, sender: Any?) {
+        pickingFill = fill
+        colorButton = sender as? NSButton
+        let panel = NSColorPanel.shared
+        panel.showsAlpha = false
+        panel.isContinuous = false
+        let shape = selection.last.flatMap { currentPage().shape(id: $0) }
+        let hex = fill ? (shape?.cell("FillForegnd")?.value ?? "#FFFFFF") : (shape?.cell("LineColor")?.value ?? "#000000")
+        panel.color = NSColor(hex: hex) ?? (fill ? .white : .black)
+        panel.target = self
+        panel.action = #selector(colorPicked(_:))
+        panel.orderFront(sender)
+    }
+
+    @objc private func colorPicked(_ panel: NSColorPanel) {
+        let ids = Set(selection)
+        guard !ids.isEmpty else { return }
+        colorButton?.subviews.first { $0.identifier?.rawValue == "swatch" }?.layer?.backgroundColor = panel.color.cgColor
+        studioDocument.mutate(pickingFill ? "Fill Color" : "Line Color") { diagram in
+            if self.pickingFill {
+                DiagramEdit.setFill(page: &diagram.pages[self.pageIndex], ids: ids, color: panel.color.hexString)
+            } else {
+                DiagramEdit.setLine(page: &diagram.pages[self.pageIndex], ids: ids, color: panel.color.hexString)
+            }
+        }
+    }
 
     @objc func chooseTool(_ sender: Any?) {
         let control = sender as? NSControl
@@ -671,8 +803,8 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         studioDocument.diagram.activePageIndex = pageIndex
     }
 
-    @objc func zoomIn(_ sender: Any?) { zoom = min(4, zoom * 1.25) }
-    @objc func zoomOut(_ sender: Any?) { zoom = max(0.15, zoom / 1.25) }
+    @objc func zoomIn(_ sender: Any?) { zoom = min(4, zoom * 1.2) }
+    @objc func zoomOut(_ sender: Any?) { zoom = max(0.15, zoom / 1.2) }
     @objc func zoomActual(_ sender: Any?) { zoom = 1 }
     @objc func zoomFit(_ sender: Any?) {
         let visible = scroll.contentView.bounds.size
@@ -734,16 +866,7 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         let ids = Set(selection)
         guard !ids.isEmpty else { return }
         studioDocument.mutate("Font Style") { diagram in
-            for id in ids {
-                diagram.pages[self.pageIndex].updateShape(id: id) { shape in
-                    if shape.character.isEmpty { shape.character = [GeoRow(type: "", ix: 0, cells: ["Style": Cell(value: "0")])] }
-                    var bits = Int(shape.character[0].raw("Style") ?? "0") ?? 0
-                    if bits & bit == 0 { bits |= bit } else { bits &= ~bit }
-                    shape.character[0].cells["Style"] = Cell(value: String(bits))
-                    shape.detached = true
-                    shape.original = nil
-                }
-            }
+            DiagramEdit.toggleFontBit(page: &diagram.pages[self.pageIndex], ids: ids, bit: bit)
         }
     }
 

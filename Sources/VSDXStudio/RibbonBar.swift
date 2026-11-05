@@ -354,6 +354,12 @@ final class RibbonBar: NSView {
         return menu
     }
 
+    private func styleItem(_ title: String, tag: Int) -> NSMenuItem {
+        let item = menuItem(title, #selector(StudioWindowController.chooseConnectorStyle(_:)))
+        item.tag = tag
+        return item
+    }
+
     private func menuItem(_ title: String, _ action: Selector, target: AnyObject? = nil) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
         if let target {
@@ -406,11 +412,21 @@ final class RibbonBar: NSView {
 
         let connector = icon("Connection", ["arrow.triangle.turn.up.right.diamond", "arrow.turn.up.right"])
         connector.identifier = NSUserInterfaceItemIdentifier("connector")
-        bind(connector, #selector(StudioWindowController.chooseTool(_:)))
         highlightButtons[.connector] = connector
+        let connectionMenu = NSMenu(title: "Connection")
+        connectionMenu.addItem(styleItem("Straight", tag: 0))
+        connectionMenu.addItem(styleItem("Orthogonal", tag: 1))
+        connectionMenu.addItem(styleItem("Simple", tag: 3))
+        connectionMenu.addItem(styleItem("Curved", tag: 2))
+        menus[ObjectIdentifier(connector)] = connectionMenu
+        connector.target = self
+        connector.action = #selector(showMenu(_:))
         let waypoints = icon("Waypoints", ["point.3.connected.trianglepath.dotted", "point.topleft.down.to.point.bottomright.curvepath"])
-        waypoints.identifier = NSUserInterfaceItemIdentifier("connector")
-        bind(waypoints, #selector(StudioWindowController.chooseTool(_:)))
+        let waypointMenu = NSMenu(title: "Waypoints")
+        waypointMenu.addItem(menuItem("Clear Waypoints", #selector(StudioWindowController.clearWaypoints(_:))))
+        menus[ObjectIdentifier(waypoints)] = waypointMenu
+        waypoints.target = self
+        waypoints.action = #selector(showMenu(_:))
 
         let rectangle = icon("Rectangle", ["rectangle", "square"])
         rectangle.identifier = NSUserInterfaceItemIdentifier("rectangle")
@@ -420,8 +436,7 @@ final class RibbonBar: NSView {
         shapes.target = self
         shapes.action = #selector(shapesClicked(_:))
         let table = icon("Table", ["tablecells", "square.grid.3x2"])
-        table.identifier = NSUserInterfaceItemIdentifier("rectangle")
-        bind(table, #selector(StudioWindowController.chooseTool(_:)))
+        bind(table, #selector(StudioWindowController.insertTable(_:)))
 
         let freehand = icon("Freehand", ["scribble", "pencil.tip", "pencil.and.scribble"])
         freehand.identifier = NSUserInterfaceItemIdentifier("line")

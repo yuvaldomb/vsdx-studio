@@ -541,6 +541,49 @@ public enum DiagramEdit {
         }
     }
 
+    public static func setOpacity(page: inout DiagramPage, ids: Set<Int>, fraction: Double) {
+        let trans = Format.number(1 - max(0, min(1, fraction)))
+        for id in ids {
+            page.updateShape(id: id) { shape in
+                shape.setCell("FillForegndTrans", value: trans, clearFormula: true)
+                shape.setCell("LineColorTrans", value: trans, clearFormula: true)
+            }
+        }
+    }
+
+    public static func setShadow(page: inout DiagramPage, ids: Set<Int>, enabled: Bool) {
+        for id in ids {
+            page.updateShape(id: id) { shape in
+                shape.setCell("ShdwPattern", value: enabled ? "1" : "0", clearFormula: true)
+                if enabled {
+                    if shape.cell("ShdwOffsetX") == nil { shape.setCell("ShdwOffsetX", value: "0.06", clearFormula: true) }
+                    if shape.cell("ShdwOffsetY") == nil { shape.setCell("ShdwOffsetY", value: "-0.06", clearFormula: true) }
+                }
+            }
+        }
+    }
+
+    public static func setRounding(page: inout DiagramPage, ids: Set<Int>, inches: Double) {
+        for id in ids {
+            page.updateShape(id: id) { shape in
+                shape.setNumber("Rounding", max(0, inches), clearFormula: true)
+            }
+        }
+    }
+
+    public static func toggleFontBit(page: inout DiagramPage, ids: Set<Int>, bit: Int) {
+        for id in ids {
+            page.updateShape(id: id) { shape in
+                if shape.character.isEmpty { shape.character = [GeoRow(type: "", ix: 0, cells: ["Style": Cell(value: "0")])] }
+                var bits = Int(shape.character[0].raw("Style") ?? "0") ?? 0
+                if bits & bit == 0 { bits |= bit } else { bits &= ~bit }
+                shape.character[0].cells["Style"] = Cell(value: String(bits))
+                shape.detached = true
+                shape.original = nil
+            }
+        }
+    }
+
     public static func setFont(page: inout DiagramPage, ids: Set<Int>, name: String? = nil, size: Double? = nil, color: String? = nil, bits: Int? = nil, align: Int? = nil, vertical: Int? = nil) {
         for id in ids {
             page.updateShape(id: id) { shape in
@@ -569,11 +612,10 @@ public enum DiagramEdit {
         for connectorId in connectorIds {
             let links = page.connects.filter { $0.fromId == connectorId }
             guard var shape = page.shape(id: connectorId) else { continue }
-            let styleValue = Int(Format.parseDouble(shape.cell("ShapeRouteStyle")?.value) ?? 1)
-            let style: ConnectorStyle = styleValue == 0 ? .straight : (styleValue == 2 ? .curve : .elbow)
+            let style = ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value)
             let begin = endpoint(links: links, begin: true, scope: scope, layout: layout, fallback: CGPoint(x: Format.parseDouble(shape.cell("BeginX")?.value) ?? 0, y: Format.parseDouble(shape.cell("BeginY")?.value) ?? 0))
             let end = endpoint(links: links, begin: false, scope: scope, layout: layout, fallback: CGPoint(x: Format.parseDouble(shape.cell("EndX")?.value) ?? 0, y: Format.parseDouble(shape.cell("EndY")?.value) ?? 0))
-            if shape.cell("UserRoute")?.value == "1", style == .elbow {
+            if shape.cell("UserRoute")?.value == "1" && (style == .elbow || style == .simple) {
                 var points = ConnectorRoute.pagePoints(shape)
                 if points.count >= 2 {
                     points[0] = begin.point
@@ -583,27 +625,64 @@ public enum DiagramEdit {
                         let last = points.count - 1
                         if abs(end.dir.x) >= abs(end.dir.y) { points[last - 1].y = end.point.y } else { points[last - 1].x = end.point.x }
                     }
-                    ConnectorRoute.apply(points: points, to: &shape)
+                    ConnectorRoute.apply(points: points, to: &shape, style: style)
                     shape.setCell("UserRoute", value: "1", clearFormula: true)
                 }
             } else {
                 let points = ConnectorRoute.route(style: style, start: begin.point, startDir: begin.dir, end: end.point, endDir: end.dir)
-                ConnectorRoute.apply(points: points, to: &shape)
+                ConnectorRoute.apply(points: points, to: &shape, style: style)
             }
             page.updateShape(id: connectorId) { $0 = shape }
         }
     }
 
-    public static func addGluedConnector(page: inout DiagramPage, fromShape: Int, fromPort: Int, toShape: Int, toPort: Int, theme: ThemeColors, colors: [Int: String]) -> Int {
+    public static func addGluedConnector(page: inout DiagramPage, fromShape: Int, fromPort: Int, toShape: Int, toPort: Int, theme: ThemeColors, colors: [Int: String], style: ConnectorStyle = .elbow) -> Int {
         page.updateShape(id: fromShape) { ShapePorts.ensure(&$0) }
         page.updateShape(id: toShape) { ShapePorts.ensure(&$0) }
         let id = page.nextShapeId()
-        let shape = StencilCatalog.make(id: "connector", shapeId: id, center: CGPoint(x: 1, y: 1))
+        var shape = StencilCatalog.make(id: "connector", shapeId: id, center: CGPoint(x: 1, y: 1))
+        shape.setCell("ShapeRouteStyle", value: style.routeValue, clearFormula: true)
         page.shapes.append(shape)
         connect(page: &page, connectorId: id, begin: true, to: fromShape, part: 100 + fromPort, cell: "Connections.X\(fromPort + 1)")
         connect(page: &page, connectorId: id, begin: false, to: toShape, part: 100 + toPort, cell: "Connections.X\(toPort + 1)")
         reroute(page: &page, moved: [fromShape, toShape], theme: theme, colors: colors)
         return id
+    }
+
+    public static func resetRoutes(page: inout DiagramPage, ids: Set<Int>, theme: ThemeColors, colors: [Int: String]) {
+        for id in ids {
+            page.updateShape(id: id) { shape in
+                guard shape.is1D else { return }
+                shape.setCell("UserRoute", value: "0", clearFormula: true)
+            }
+        }
+        let targets = Set(page.connects.filter { ids.contains($0.fromId) }.map(\.toId))
+        if !targets.isEmpty {
+            reroute(page: &page, moved: targets, theme: theme, colors: colors)
+        }
+        for id in ids {
+            if page.connects.contains(where: { $0.fromId == id }) { continue }
+            guard var shape = page.shape(id: id), shape.is1D else { continue }
+            let style = ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value)
+            let start = CGPoint(
+                x: Format.parseDouble(shape.cell("BeginX")?.value) ?? 0,
+                y: Format.parseDouble(shape.cell("BeginY")?.value) ?? 0
+            )
+            let end = CGPoint(
+                x: Format.parseDouble(shape.cell("EndX")?.value) ?? 0,
+                y: Format.parseDouble(shape.cell("EndY")?.value) ?? 0
+            )
+            let points = ConnectorRoute.route(
+                style: style,
+                start: start,
+                startDir: ConnectorRoute.axisDirection(from: start, to: end),
+                end: end,
+                endDir: ConnectorRoute.axisDirection(from: end, to: start)
+            )
+            ConnectorRoute.apply(points: points, to: &shape, style: style)
+            shape.setCell("UserRoute", value: "0", clearFormula: true)
+            page.updateShape(id: id) { $0 = shape }
+        }
     }
 
     public static func connect(page: inout DiagramPage, connectorId: Int, begin: Bool, to shapeId: Int, part: Int, cell: String) {

@@ -191,9 +191,8 @@ final class StencilTile: NSView, NSDraggingSource {
         alphaValue = 0.75
         toolTip = item.name
         let icon = NSImageView()
-        icon.image = StencilTile.symbol(for: item)
+        icon.image = StencilTile.icon(for: item.id)
         icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.contentTintColor = .black
         icon.translatesAutoresizingMaskIntoConstraints = false
         addSubview(icon)
         NSLayoutConstraint.activate([
@@ -202,14 +201,6 @@ final class StencilTile: NSView, NSDraggingSource {
             icon.topAnchor.constraint(equalTo: topAnchor, constant: 2),
             icon.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
         ])
-        let stencilID = item.id
-        DispatchQueue.global(qos: .utility).async {
-            guard let data = PageDrawing.renderPNG(page: StencilCatalog.previewPage(id: stencilID), theme: ThemeColors(), colors: [:], pixelsPerInch: 40, margin: 2) else { return }
-            DispatchQueue.main.async {
-                icon.image = NSImage(data: data)
-                icon.contentTintColor = nil
-            }
-        }
     }
 
     required init?(coder: NSCoder) { nil }
@@ -233,16 +224,9 @@ final class StencilTile: NSView, NSDraggingSource {
 
     func draggingSession(_ session: NSDraggingSession, sourceOperationMaskFor context: NSDraggingContext) -> NSDragOperation { .copy }
 
-    private static func symbol(for item: StencilItem) -> NSImage? {
-        let name: String
-        switch item.category {
-        case "Flowchart": name = "arrow.triangle.branch"
-        case "Connectors": name = "arrow.right"
-        case "Block Arrows": name = "arrow.right.square"
-        case "Callouts": name = "text.bubble"
-        default: name = "square.on.square"
-        }
-        return NSImage(systemSymbolName: name, accessibilityDescription: item.name)
+    private static func icon(for id: String) -> NSImage? {
+        guard let data = PageDrawing.renderIconPNG(page: StencilCatalog.previewPage(id: id), theme: ThemeColors(), colors: [:], pixels: 96) else { return nil }
+        return NSImage(data: data)
     }
 
     private func snapshot() -> NSImage {
@@ -293,11 +277,20 @@ final class FormatPane: NSView {
     private let weight = NSPopUpButton()
     private let pattern = NSPopUpButton()
     private let endArrow = NSPopUpButton()
+    private let beginArrow = NSPopUpButton()
+    private let opacity = NSPopUpButton()
+    private let corner = NSPopUpButton()
+    private let route = NSPopUpButton()
+    private let shadowCheck = NSButton(checkboxWithTitle: "Shadow", target: nil, action: nil)
     private let fontName = NSPopUpButton()
     private let fontSize = NSPopUpButton()
+    private let boldButton = NSButton(checkboxWithTitle: "Bold", target: nil, action: nil)
+    private let italicButton = NSButton(checkboxWithTitle: "Italic", target: nil, action: nil)
+    private let underlineButton = NSButton(checkboxWithTitle: "Underline", target: nil, action: nil)
     private let dataLabel = NSTextField()
     private let dataValue = NSTextField()
     private var shapeID: Int?
+    private var refreshing = false
 
     var showsGrid = true {
         didSet { gridCheck.state = showsGrid ? .on : .off }
@@ -317,6 +310,16 @@ final class FormatPane: NSView {
         case fontSize(Double)
         case fontColor(NSColor)
         case shapeData(label: String, value: String)
+        case opacity(Double)
+        case shadow(Bool)
+        case rounding(Double)
+        case beginArrow(Int)
+        case fontBit(Int)
+        case textAlign(Int)
+        case verticalAlign(Int)
+        case route(ConnectorStyle)
+        case bringFront
+        case sendBack
     }
 
     override init(frame frameRect: NSRect) {
@@ -381,11 +384,35 @@ final class FormatPane: NSView {
         endArrow.font = NSFont.systemFont(ofSize: 12)
         endArrow.target = self
         endArrow.action = #selector(commitArrow)
+        beginArrow.addItems(withTitles: ["No arrow", "Open arrow", "Filled arrow", "Diamond", "Circle"])
+        beginArrow.font = NSFont.systemFont(ofSize: 12)
+        beginArrow.target = self
+        beginArrow.action = #selector(commitBeginArrow)
+        opacity.addItems(withTitles: ["100%", "75%", "50%", "25%", "0%"])
+        opacity.font = NSFont.systemFont(ofSize: 12)
+        opacity.target = self
+        opacity.action = #selector(commitOpacity)
+        corner.addItems(withTitles: ["Sharp", "Rounded", "Curved"])
+        corner.font = NSFont.systemFont(ofSize: 12)
+        corner.target = self
+        corner.action = #selector(commitCorner)
+        route.addItems(withTitles: ["Straight", "Orthogonal", "Simple", "Curved"])
+        route.font = NSFont.systemFont(ofSize: 12)
+        route.target = self
+        route.action = #selector(commitRoute)
+        shadowCheck.font = NSFont.systemFont(ofSize: 12)
+        shadowCheck.target = self
+        shadowCheck.action = #selector(commitShadow)
         styleStack.addArrangedSubview(labeled("Fill", fillWell))
         styleStack.addArrangedSubview(labeled("Line", lineWell))
         styleStack.addArrangedSubview(labeled("Weight", weight))
         styleStack.addArrangedSubview(labeled("Pattern", pattern))
+        styleStack.addArrangedSubview(labeled("Route", route))
+        styleStack.addArrangedSubview(labeled("Corner", corner))
+        styleStack.addArrangedSubview(labeled("Start", beginArrow))
         styleStack.addArrangedSubview(labeled("Arrow", endArrow))
+        styleStack.addArrangedSubview(labeled("Opacity", opacity))
+        styleStack.addArrangedSubview(shadowCheck)
         styleStack.addArrangedSubview(section("Shape Data"))
         dataLabel.placeholderString = "Label"
         dataLabel.font = NSFont.systemFont(ofSize: 12)
@@ -407,9 +434,30 @@ final class FormatPane: NSView {
         fontSize.action = #selector(commitFontSize)
         fontWell.target = self
         fontWell.action = #selector(commitFontColor)
+        for button in [boldButton, italicButton, underlineButton] {
+            button.font = NSFont.systemFont(ofSize: 12)
+            button.target = self
+        }
+        boldButton.action = #selector(commitBold)
+        italicButton.action = #selector(commitItalic)
+        underlineButton.action = #selector(commitUnderline)
+        let styleRow = NSStackView(views: [boldButton, italicButton, underlineButton])
+        styleRow.orientation = .horizontal
+        styleRow.spacing = 8
         textStack.addArrangedSubview(labeled("Font", fontName))
         textStack.addArrangedSubview(labeled("Size", fontSize))
         textStack.addArrangedSubview(labeled("Color", fontWell))
+        textStack.addArrangedSubview(styleRow)
+        textStack.addArrangedSubview(buttonRow([
+            ("Left", #selector(commitAlignLeft)),
+            ("Center", #selector(commitAlignCenter)),
+            ("Right", #selector(commitAlignRight))
+        ]))
+        textStack.addArrangedSubview(buttonRow([
+            ("Top", #selector(commitAlignTop)),
+            ("Middle", #selector(commitAlignMiddle)),
+            ("Bottom", #selector(commitAlignBottom))
+        ]))
 
         configure(arrangeStack)
         for field in [xField, yField, wField, hField, angleField] {
@@ -422,6 +470,10 @@ final class FormatPane: NSView {
         arrangeStack.addArrangedSubview(labeled("W", wField))
         arrangeStack.addArrangedSubview(labeled("H", hField))
         arrangeStack.addArrangedSubview(labeled("Angle", angleField))
+        arrangeStack.addArrangedSubview(buttonRow([
+            ("To Front", #selector(commitFront)),
+            ("To Back", #selector(commitBack))
+        ]))
 
         let stack = NSStackView()
         configure(stack)
@@ -475,6 +527,8 @@ final class FormatPane: NSView {
     required init?(coder: NSCoder) { nil }
 
     func show(shape: ShapeNode?) {
+        refreshing = true
+        defer { refreshing = false }
         let same = shape?.id != nil && shape?.id == shapeID
         if shape != nil && !same { formatTab = 0 }
         shapeID = shape?.id
@@ -503,6 +557,26 @@ final class FormatPane: NSView {
             dataLabel.stringValue = ""
             dataValue.stringValue = ""
         }
+        let trans = Format.parseDouble(shape.cell("FillForegndTrans")?.value) ?? 0
+        let visible = Int(((1 - trans) * 100).rounded())
+        let percents = [100, 75, 50, 25, 0]
+        let nearest = percents.enumerated().min { abs($0.element - visible) < abs($1.element - visible) }?.offset ?? 0
+        opacity.selectItem(at: nearest)
+        shadowCheck.state = (Format.parseDouble(shape.cell("ShdwPattern")?.value) ?? 0) == 0 ? .off : .on
+        let rounding = Format.parseDouble(shape.cell("Rounding")?.value) ?? 0
+        corner.selectItem(at: rounding < 0.04 ? 0 : (rounding < 0.22 ? 1 : 2))
+        switch ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value) {
+        case .straight: route.selectItem(at: 0)
+        case .elbow: route.selectItem(at: 1)
+        case .simple: route.selectItem(at: 2)
+        case .curve: route.selectItem(at: 3)
+        }
+        beginArrow.selectItem(at: arrowIndex(Int(Format.parseDouble(shape.cell("BeginArrow")?.value) ?? 0)))
+        endArrow.selectItem(at: arrowIndex(Int(Format.parseDouble(shape.cell("EndArrow")?.value) ?? 0)))
+        let bits = Int(shape.character.first?.raw("Style") ?? "0") ?? 0
+        boldButton.state = bits & 1 == 0 ? .off : .on
+        italicButton.state = bits & 2 == 0 ? .off : .on
+        underlineButton.state = bits & 4 == 0 ? .off : .on
     }
 
     private func applyMode(hasShape: Bool) {
@@ -562,10 +636,64 @@ final class FormatPane: NSView {
     }
     @objc private func commitArrow() {
         let values = [0, 1, 13, 5, 10]
-        onChange?(.arrow(values[max(0, endArrow.indexOfSelectedItem)]))
+        emit(.arrow(values[max(0, endArrow.indexOfSelectedItem)]))
     }
+    @objc private func commitBeginArrow() {
+        let values = [0, 1, 13, 5, 10]
+        emit(.beginArrow(values[max(0, beginArrow.indexOfSelectedItem)]))
+    }
+    @objc private func commitOpacity() {
+        let values = [1.0, 0.75, 0.5, 0.25, 0.0]
+        let index = max(0, min(values.count - 1, opacity.indexOfSelectedItem))
+        emit(.opacity(values[index]))
+    }
+    @objc private func commitCorner() {
+        let values = [0.0, 0.12, 0.35]
+        let index = max(0, min(values.count - 1, corner.indexOfSelectedItem))
+        emit(.rounding(values[index]))
+    }
+    @objc private func commitRoute() {
+        let styles: [ConnectorStyle] = [.straight, .elbow, .simple, .curve]
+        let index = max(0, min(styles.count - 1, route.indexOfSelectedItem))
+        emit(.route(styles[index]))
+    }
+    @objc private func commitShadow() { emit(.shadow(shadowCheck.state == .on)) }
+    @objc private func commitBold() { emit(.fontBit(1)) }
+    @objc private func commitItalic() { emit(.fontBit(2)) }
+    @objc private func commitUnderline() { emit(.fontBit(4)) }
+    @objc private func commitAlignLeft() { emit(.textAlign(0)) }
+    @objc private func commitAlignCenter() { emit(.textAlign(1)) }
+    @objc private func commitAlignRight() { emit(.textAlign(2)) }
+    @objc private func commitAlignTop() { emit(.verticalAlign(0)) }
+    @objc private func commitAlignMiddle() { emit(.verticalAlign(1)) }
+    @objc private func commitAlignBottom() { emit(.verticalAlign(2)) }
+    @objc private func commitFront() { emit(.bringFront) }
+    @objc private func commitBack() { emit(.sendBack) }
     @objc private func commitData() {
-        onChange?(.shapeData(label: dataLabel.stringValue, value: dataValue.stringValue))
+        emit(.shapeData(label: dataLabel.stringValue, value: dataValue.stringValue))
+    }
+
+    private func emit(_ change: FormatChange) {
+        guard !refreshing else { return }
+        onChange?(change)
+    }
+
+    private func arrowIndex(_ value: Int) -> Int {
+        [0, 1, 13, 5, 10].firstIndex(of: value) ?? 0
+    }
+
+    private func buttonRow(_ items: [(String, Selector)]) -> NSView {
+        let buttons = items.map { title, action -> NSButton in
+            let button = NSButton(title: title, target: self, action: action)
+            button.font = NSFont.systemFont(ofSize: 11)
+            button.bezelStyle = .rounded
+            button.controlSize = .small
+            return button
+        }
+        let row = NSStackView(views: buttons)
+        row.orientation = .horizontal
+        row.spacing = 6
+        return row
     }
 
     private func configure(_ stack: NSStackView) {

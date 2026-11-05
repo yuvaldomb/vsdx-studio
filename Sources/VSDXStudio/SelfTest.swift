@@ -116,9 +116,11 @@ enum SelfTest {
             if let format = first(FormatPane.self, in: content) {
                 let titles = all(NSButton.self, in: format).map(\.title)
                 check(titles.contains("Style") && titles.contains("Text") && titles.contains("Arrange"), "format pane has Style, Text, and Arrange")
+                check(titles.contains("Bold") && titles.contains("Shadow") && titles.contains("To Front") && titles.contains("To Back"), "format pane has style and arrange actions")
                 check(titles.contains("Grid") && titles.contains("Connection Arrows") && titles.contains("Connection Points") && titles.contains("Guides"), "diagram format options")
                 let labels = all(NSTextField.self, in: format).map(\.stringValue)
                 check(labels.contains("10 pt"), "grid size label is 10 pt")
+                check(labels.contains("Route") && labels.contains("Opacity") && labels.contains("Corner"), "format pane has route, opacity, and corner")
                 check(labels.contains("Page View"), "page view note")
             }
             if let page = find(identifier: "pageBar", in: content) {

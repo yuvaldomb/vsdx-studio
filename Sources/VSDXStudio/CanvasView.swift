@@ -10,6 +10,7 @@ protocol CanvasHost: AnyObject {
     var snapEnabled: Bool { get }
     var showGrid: Bool { get }
     var showConnections: Bool { get }
+    var connectorStyle: ConnectorStyle { get }
     func beginPreview()
     func preview(_ body: (inout Diagram) -> Void)
     func commitPreview(_ name: String)
@@ -232,14 +233,27 @@ final class CanvasView: NSView {
         let target = wireTarget?.anchor ?? end
         let startDir = layoutItems().first { $0.id == shape }?.connectionDirs[safe: index] ?? CGPoint(x: 1, y: 0)
         let dir = wireTarget?.dir ?? CGPoint(x: -startDir.x, y: -startDir.y)
-        let points = ConnectorRoute.route(style: .elbow, start: anchor, startDir: startDir, end: target, endDir: dir)
+        let style = host?.connectorStyle ?? .elbow
+        let points = ConnectorRoute.route(style: style, start: anchor, startDir: startDir, end: target, endDir: dir)
         let path = NSBezierPath()
-        for (index, point) in points.enumerated() {
-            let view = pageToView(point)
-            if index == 0 { path.move(to: view) } else { path.line(to: view) }
+        if style == .curve, points.count >= 3 {
+            let start = pageToView(points[0])
+            let control = pageToView(points[1])
+            let end = pageToView(points[points.count - 1])
+            path.move(to: start)
+            path.curve(
+                to: end,
+                controlPoint1: NSPoint(x: start.x + (control.x - start.x) * 2 / 3, y: start.y + (control.y - start.y) * 2 / 3),
+                controlPoint2: NSPoint(x: end.x + (control.x - end.x) * 2 / 3, y: end.y + (control.y - end.y) * 2 / 3)
+            )
+        } else {
+            for (index, point) in points.enumerated() {
+                let view = pageToView(point)
+                if index == 0 { path.move(to: view) } else { path.line(to: view) }
+            }
         }
-        NSColor.systemBlue.setStroke()
-        path.lineWidth = 1.6
+        NSColor.black.setStroke()
+        path.lineWidth = 1.25
         path.stroke()
         if points.count >= 2 {
             let tip = pageToView(points[points.count - 1])
@@ -850,7 +864,10 @@ final class CanvasView: NSView {
         guard var shape = diagram.pages[pageIndex].shape(id: id) else { return }
         var points = ConnectorRoute.pagePoints(shape)
         guard points.indices.contains(index) else { return }
-        if bend {
+        let style = ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value)
+        if style == .curve, points.count >= 3 {
+            points[1] = point
+        } else if bend {
             let old = points[index]
             let previous = index > 0 ? points[index - 1] : old
             let next = index + 1 < points.count ? points[index + 1] : old
@@ -873,7 +890,7 @@ final class CanvasView: NSView {
                 points[index + 1].x = point.x
             }
         }
-        ConnectorRoute.apply(points: points, to: &shape)
+        ConnectorRoute.apply(points: points, to: &shape, style: style)
         shape.id = id
         shape.setCell("UserRoute", value: "1", clearFormula: true)
         diagram.pages[pageIndex].updateShape(id: id) { $0 = shape }
@@ -993,10 +1010,11 @@ final class CanvasView: NSView {
             ConnectorRoute.apply(points: [origin, end], to: &shape)
         case .connector:
             shape = StencilCatalog.make(id: "connector", shapeId: id, center: origin)
+            let style = host?.connectorStyle ?? .elbow
             let leave = ConnectorRoute.axisDirection(from: origin, to: end)
             let arrive = ConnectorRoute.axisDirection(from: end, to: origin)
-            let points = ConnectorRoute.route(style: .elbow, start: origin, startDir: leave, end: end, endDir: arrive)
-            ConnectorRoute.apply(points: points, to: &shape)
+            let points = ConnectorRoute.route(style: style, start: origin, startDir: leave, end: end, endDir: arrive)
+            ConnectorRoute.apply(points: points, to: &shape, style: style)
         case .text:
             shape = StencilCatalog.make(id: "text", shapeId: id, center: CGPoint(x: (origin.x + end.x) / 2, y: (origin.y + end.y) / 2))
             shape.setNumber("Width", max(0.4, abs(Double(end.x - start.x))), clearFormula: true)
@@ -1023,10 +1041,9 @@ final class CanvasView: NSView {
         )
         let start = begin ? point : other
         let end = begin ? other : point
-        let styleValue = Int(Format.parseDouble(shape.cell("ShapeRouteStyle")?.value) ?? 1)
-        let style: ConnectorStyle = styleValue == 0 ? .straight : .elbow
+        let style = ConnectorStyle.from(route: shape.cell("ShapeRouteStyle")?.value)
         let points = ConnectorRoute.route(style: style, start: start, startDir: ConnectorRoute.axisDirection(from: start, to: end), end: end, endDir: ConnectorRoute.axisDirection(from: end, to: start))
-        ConnectorRoute.apply(points: points, to: &shape)
+        ConnectorRoute.apply(points: points, to: &shape, style: style)
         shape.id = id
         diagram.pages[index].updateShape(id: id) { $0 = shape }
     }
@@ -1083,7 +1100,8 @@ final class CanvasView: NSView {
                 toShape: target.shape,
                 toPort: target.index,
                 theme: diagram.theme,
-                colors: diagram.colors
+                colors: diagram.colors,
+                style: self.host?.connectorStyle ?? .elbow
             )
             self.selection = [id]
             self.host?.selection = [id]
