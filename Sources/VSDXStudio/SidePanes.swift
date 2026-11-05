@@ -1,43 +1,99 @@
 import AppKit
 import VSDXCore
 
+private enum DrawioPane {
+    static let chrome = NSColor(srgbRed: 241.0 / 255, green: 243.0 / 255, blue: 244.0 / 255, alpha: 1)
+    static let line = NSColor(srgbRed: 218.0 / 255, green: 218.0 / 255, blue: 218.0 / 255, alpha: 1)
+    static let more = NSColor(srgbRed: 194.0 / 255, green: 231.0 / 255, blue: 255.0 / 255, alpha: 1)
+}
+
 final class ShapesPane: NSView {
     var onPlace: ((String) -> Void)?
     private let search = NSSearchField()
     private let list = NSStackView()
-    private var tiles: [(StencilItem, NSView)] = []
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = StudioChrome.pane.cgColor
-        search.placeholderString = "Search shapes"
+        layer?.backgroundColor = DrawioPane.chrome.cgColor
+
+        let searchWell = NSView()
+        searchWell.wantsLayer = true
+        searchWell.layer?.backgroundColor = NSColor.white.cgColor
+        searchWell.layer?.cornerRadius = 18
+        searchWell.layer?.borderWidth = 1
+        searchWell.layer?.borderColor = DrawioPane.line.cgColor
+        searchWell.layer?.masksToBounds = true
+        searchWell.translatesAutoresizingMaskIntoConstraints = false
+
+        search.placeholderString = "Type / to search"
+        search.font = NSFont.systemFont(ofSize: 13)
+        search.isBezeled = false
+        search.isBordered = false
+        search.drawsBackground = false
+        search.focusRingType = .none
+        search.sendsSearchStringImmediately = true
         search.target = self
-        search.action = #selector(filter)
+        search.action = #selector(submitSearch)
         search.translatesAutoresizingMaskIntoConstraints = false
+        searchWell.addSubview(search)
+        NotificationCenter.default.addObserver(self, selector: #selector(searchEdited(_:)), name: NSControl.textDidChangeNotification, object: search)
+
         let scroll = NSScrollView()
         scroll.drawsBackground = false
         scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay
         scroll.translatesAutoresizingMaskIntoConstraints = false
         list.orientation = .vertical
         list.alignment = .leading
-        list.spacing = 8
-        list.edgeInsets = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        list.spacing = 6
+        list.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 8, right: 8)
         list.translatesAutoresizingMaskIntoConstraints = false
         let document = NSView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(list)
         scroll.documentView = document
-        addSubview(search)
+
+        let more = FillButton()
+        more.title = "+ More Shapes"
+        more.fill = DrawioPane.more
+        more.isBordered = false
+        more.wantsLayer = true
+        more.target = self
+        more.action = #selector(moreShapes)
+        more.toolTip = "More shapes"
+        more.translatesAutoresizingMaskIntoConstraints = false
+
+        let border = NSView()
+        border.wantsLayer = true
+        border.layer?.backgroundColor = DrawioPane.line.cgColor
+        border.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(searchWell)
         addSubview(scroll)
+        addSubview(more)
+        addSubview(border)
         NSLayoutConstraint.activate([
-            search.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-            search.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-            search.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            searchWell.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            searchWell.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            searchWell.topAnchor.constraint(equalTo: topAnchor, constant: 8),
+            searchWell.heightAnchor.constraint(equalToConstant: 28),
+            search.leadingAnchor.constraint(equalTo: searchWell.leadingAnchor, constant: 12),
+            search.trailingAnchor.constraint(equalTo: searchWell.trailingAnchor, constant: -8),
+            search.topAnchor.constraint(equalTo: searchWell.topAnchor, constant: 2),
+            search.bottomAnchor.constraint(equalTo: searchWell.bottomAnchor, constant: -2),
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: search.bottomAnchor, constant: 6),
-            scroll.bottomAnchor.constraint(equalTo: bottomAnchor),
+            scroll.topAnchor.constraint(equalTo: searchWell.bottomAnchor, constant: 6),
+            scroll.bottomAnchor.constraint(equalTo: more.topAnchor, constant: -6),
+            more.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            more.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
+            more.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -8),
+            more.heightAnchor.constraint(equalToConstant: 32),
+            border.trailingAnchor.constraint(equalTo: trailingAnchor),
+            border.topAnchor.constraint(equalTo: topAnchor),
+            border.bottomAnchor.constraint(equalTo: bottomAnchor),
+            border.widthAnchor.constraint(equalToConstant: 1),
             document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
             document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
             document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
@@ -52,39 +108,62 @@ final class ShapesPane: NSView {
 
     required init?(coder: NSCoder) { nil }
 
-    @objc private func filter() { rebuild(query: search.stringValue) }
+    deinit {
+        NotificationCenter.default.removeObserver(self)
+    }
+
+    @objc private func submitSearch() { rebuild(query: search.stringValue) }
+    @objc private func searchEdited(_ note: Notification) { rebuild(query: search.stringValue) }
+
+    @objc private func moreShapes() {
+        window?.makeFirstResponder(search)
+    }
 
     private func rebuild(query: String) {
         list.arrangedSubviews.forEach { $0.removeFromSuperview() }
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        var placedSection = false
         for category in StencilCatalog.categories {
             let items = StencilCatalog.items.filter { $0.category == category && (needle.isEmpty || $0.name.lowercased().contains(needle) || $0.keywords.contains(needle)) }
             guard !items.isEmpty else { continue }
+            if placedSection {
+                let gap = NSView()
+                gap.translatesAutoresizingMaskIntoConstraints = false
+                gap.heightAnchor.constraint(equalToConstant: 8).isActive = true
+                list.addArrangedSubview(gap)
+            }
+            placedSection = true
             let header = NSTextField(labelWithString: category)
-            header.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
-            header.textColor = StudioChrome.title
+            header.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+            header.textColor = .black
+            header.alignment = .left
             list.addArrangedSubview(header)
-            let grid = NSGridView(views: [])
-            grid.rowSpacing = 4
-            grid.columnSpacing = 4
             var row: [NSView] = []
             for item in items {
                 let tile = StencilTile(item: item)
                 tile.onPlace = { [weak self] in self?.onPlace?(item.id) }
-                tile.widthAnchor.constraint(equalToConstant: 92).isActive = true
-                tile.heightAnchor.constraint(equalToConstant: 64).isActive = true
+                tile.translatesAutoresizingMaskIntoConstraints = false
+                tile.widthAnchor.constraint(equalToConstant: 38).isActive = true
+                tile.heightAnchor.constraint(equalToConstant: 36).isActive = true
                 row.append(tile)
-                if row.count == 2 {
-                    grid.addRow(with: row)
+                if row.count == 5 {
+                    list.addArrangedSubview(tileRow(row))
                     row = []
                 }
             }
             if !row.isEmpty {
-                while row.count < 2 { row.append(NSView()) }
-                grid.addRow(with: row)
+                list.addArrangedSubview(tileRow(row))
             }
-            list.addArrangedSubview(grid)
         }
+    }
+
+    private func tileRow(_ tiles: [NSView]) -> NSView {
+        let row = NSStackView(views: tiles)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 4
+        row.distribution = .gravityAreas
+        return row
     }
 }
 
@@ -96,30 +175,22 @@ final class StencilTile: NSView, NSDraggingSource {
         stencilID = item.id
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.white.cgColor
+        layer?.backgroundColor = NSColor.clear.cgColor
         layer?.cornerRadius = 4
-        layer?.borderWidth = 1
-        layer?.borderColor = StudioChrome.hairline.cgColor
+        layer?.masksToBounds = true
+        alphaValue = 0.75
+        toolTip = item.name
         let icon = NSImageView()
         icon.image = StencilTile.symbol(for: item)
         icon.imageScaling = .scaleProportionallyUpOrDown
-        icon.contentTintColor = StudioChrome.accent
-        let label = NSTextField(labelWithString: item.name)
-        label.font = NSFont.systemFont(ofSize: 9)
-        label.alignment = .center
-        label.lineBreakMode = .byTruncatingTail
-        let stack = NSStackView(views: [icon, label])
-        stack.orientation = .vertical
-        stack.spacing = 2
-        stack.edgeInsets = NSEdgeInsets(top: 4, left: 4, bottom: 4, right: 4)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        icon.contentTintColor = .black
+        icon.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(icon)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor),
-            stack.topAnchor.constraint(equalTo: topAnchor),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor),
-            icon.heightAnchor.constraint(equalToConstant: 34)
+            icon.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            icon.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            icon.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            icon.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2)
         ])
         let stencilID = item.id
         DispatchQueue.global(qos: .utility).async {
@@ -177,6 +248,30 @@ final class StencilTile: NSView, NSDraggingSource {
 
 final class FormatPane: NSView {
     var onChange: ((FormatChange) -> Void)?
+    var onToggleGrid: ((Bool) -> Void)?
+    var onToggleConnectionPoints: ((Bool) -> Void)?
+
+    private let diagramStack = NSStackView()
+    private let tabRow = NSStackView()
+    private let styleStack = NSStackView()
+    private let textStack = NSStackView()
+    private let arrangeStack = NSStackView()
+    private var tabButtons: [TextTabButton] = []
+    private var formatTab = 0
+
+    private let gridCheck: NSButton = {
+        let button = NSButton(checkboxWithTitle: "Grid", target: nil, action: nil)
+        button.font = NSFont.systemFont(ofSize: 12)
+        button.state = .on
+        return button
+    }()
+    private let pointsCheck: NSButton = {
+        let button = NSButton(checkboxWithTitle: "Connection Points", target: nil, action: nil)
+        button.font = NSFont.systemFont(ofSize: 12)
+        button.state = .off
+        return button
+    }()
+
     private let xField = NSTextField()
     private let yField = NSTextField()
     private let wField = NSTextField()
@@ -194,6 +289,13 @@ final class FormatPane: NSView {
     private let dataValue = NSTextField()
     private var shapeID: Int?
 
+    var showsGrid = true {
+        didSet { gridCheck.state = showsGrid ? .on : .off }
+    }
+    var showsConnectionPoints = false {
+        didSet { pointsCheck.state = showsConnectionPoints ? .on : .off }
+    }
+
     enum FormatChange {
         case position(x: Double?, y: Double?, w: Double?, h: Double?, angle: Double?)
         case fill(NSColor?)
@@ -210,70 +312,135 @@ final class FormatPane: NSView {
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
-        layer?.backgroundColor = StudioChrome.pane.cgColor
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 8
-        stack.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        stack.addArrangedSubview(section("Size & Position"))
-        stack.addArrangedSubview(grid([
-            ("X", xField), ("Y", yField), ("Width", wField), ("Height", hField), ("Angle", angleField)
-        ]))
+        layer?.backgroundColor = NSColor.white.cgColor
+
+        gridCheck.target = self
+        gridCheck.action = #selector(gridClicked)
+        pointsCheck.target = self
+        pointsCheck.action = #selector(pointsClicked)
+
+        configure(diagramStack)
+        diagramStack.addArrangedSubview(section("Diagram"))
+        let gridSize = NSTextField(labelWithString: "10 pt")
+        gridSize.font = NSFont.systemFont(ofSize: 12)
+        gridSize.textColor = .black
+        let gridRow = NSStackView(views: [gridCheck, gridSize])
+        gridRow.orientation = .horizontal
+        gridRow.alignment = .centerY
+        gridRow.spacing = 8
+        diagramStack.addArrangedSubview(gridRow)
+        diagramStack.addArrangedSubview(bodyLabel("Page View"))
+        diagramStack.addArrangedSubview(option("Connection Arrows", on: true))
+        diagramStack.addArrangedSubview(pointsCheck)
+        diagramStack.addArrangedSubview(option("Guides", on: true))
+
+        tabRow.orientation = .horizontal
+        tabRow.alignment = .centerY
+        tabRow.spacing = 2
+        tabRow.distribution = .gravityAreas
+        tabRow.translatesAutoresizingMaskIntoConstraints = false
+        for (index, title) in ["Style", "Text", "Arrange"].enumerated() {
+            let button = TextTabButton()
+            button.title = title
+            button.tag = index
+            button.target = self
+            button.action = #selector(selectFormatTab(_:))
+            button.isBordered = false
+            button.wantsLayer = true
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 64).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 26).isActive = true
+            tabButtons.append(button)
+            tabRow.addArrangedSubview(button)
+        }
+
+        configure(styleStack)
+        fillWell.target = self
+        fillWell.action = #selector(commitFill)
+        lineWell.target = self
+        lineWell.action = #selector(commitLine)
+        weight.addItems(withTitles: ["0.5 pt", "0.75 pt", "1 pt", "1.5 pt", "2.25 pt", "3 pt", "6 pt"])
+        weight.font = NSFont.systemFont(ofSize: 12)
+        weight.target = self
+        weight.action = #selector(commitWeight)
+        pattern.addItems(withTitles: ["Solid", "Dashed", "Dotted", "Dash-dot", "None"])
+        pattern.font = NSFont.systemFont(ofSize: 12)
+        pattern.target = self
+        pattern.action = #selector(commitPattern)
+        endArrow.addItems(withTitles: ["No arrow", "Open arrow", "Filled arrow", "Diamond", "Circle"])
+        endArrow.font = NSFont.systemFont(ofSize: 12)
+        endArrow.target = self
+        endArrow.action = #selector(commitArrow)
+        styleStack.addArrangedSubview(labeled("Fill", fillWell))
+        styleStack.addArrangedSubview(labeled("Line", lineWell))
+        styleStack.addArrangedSubview(labeled("Weight", weight))
+        styleStack.addArrangedSubview(labeled("Pattern", pattern))
+        styleStack.addArrangedSubview(labeled("Arrow", endArrow))
+        styleStack.addArrangedSubview(section("Shape Data"))
+        dataLabel.placeholderString = "Label"
+        dataLabel.font = NSFont.systemFont(ofSize: 12)
+        dataValue.placeholderString = "Value"
+        dataValue.font = NSFont.systemFont(ofSize: 12)
+        dataValue.target = self
+        dataValue.action = #selector(commitData)
+        styleStack.addArrangedSubview(labeled("Label", dataLabel))
+        styleStack.addArrangedSubview(labeled("Value", dataValue))
+
+        configure(textStack)
+        fontName.addItems(withTitles: ["Calibri", "Arial", "Helvetica", "Times New Roman", "Georgia", "Courier New", "Segoe UI"])
+        fontName.font = NSFont.systemFont(ofSize: 12)
+        fontName.target = self
+        fontName.action = #selector(commitFont)
+        fontSize.addItems(withTitles: ["8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "36"])
+        fontSize.font = NSFont.systemFont(ofSize: 12)
+        fontSize.target = self
+        fontSize.action = #selector(commitFontSize)
+        fontWell.target = self
+        fontWell.action = #selector(commitFontColor)
+        textStack.addArrangedSubview(labeled("Font", fontName))
+        textStack.addArrangedSubview(labeled("Size", fontSize))
+        textStack.addArrangedSubview(labeled("Color", fontWell))
+
+        configure(arrangeStack)
         for field in [xField, yField, wField, hField, angleField] {
             field.target = self
             field.action = #selector(commitPosition)
             field.font = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .regular)
         }
-        stack.addArrangedSubview(section("Fill"))
-        fillWell.target = self
-        fillWell.action = #selector(commitFill)
-        stack.addArrangedSubview(labeled("Color", fillWell))
-        stack.addArrangedSubview(section("Line"))
-        lineWell.target = self
-        lineWell.action = #selector(commitLine)
-        weight.addItems(withTitles: ["0.5 pt", "0.75 pt", "1 pt", "1.5 pt", "2.25 pt", "3 pt", "6 pt"])
-        weight.target = self
-        weight.action = #selector(commitWeight)
-        pattern.addItems(withTitles: ["Solid", "Dashed", "Dotted", "Dash-dot", "None"])
-        pattern.target = self
-        pattern.action = #selector(commitPattern)
-        endArrow.addItems(withTitles: ["No arrow", "Open arrow", "Filled arrow", "Diamond", "Circle"])
-        endArrow.target = self
-        endArrow.action = #selector(commitArrow)
-        stack.addArrangedSubview(labeled("Color", lineWell))
-        stack.addArrangedSubview(labeled("Weight", weight))
-        stack.addArrangedSubview(labeled("Pattern", pattern))
-        stack.addArrangedSubview(labeled("End", endArrow))
-        stack.addArrangedSubview(section("Text"))
-        fontName.addItems(withTitles: ["Calibri", "Arial", "Helvetica", "Times New Roman", "Georgia", "Courier New", "Segoe UI"])
-        fontName.target = self
-        fontName.action = #selector(commitFont)
-        fontSize.addItems(withTitles: ["8", "9", "10", "11", "12", "14", "16", "18", "20", "24", "28", "36"])
-        fontSize.target = self
-        fontSize.action = #selector(commitFontSize)
-        fontWell.target = self
-        fontWell.action = #selector(commitFontColor)
-        stack.addArrangedSubview(labeled("Font", fontName))
-        stack.addArrangedSubview(labeled("Size", fontSize))
-        stack.addArrangedSubview(labeled("Color", fontWell))
-        stack.addArrangedSubview(section("Shape Data"))
-        dataLabel.placeholderString = "Label"
-        dataValue.placeholderString = "Value"
-        dataValue.target = self
-        dataValue.action = #selector(commitData)
-        stack.addArrangedSubview(labeled("Label", dataLabel))
-        stack.addArrangedSubview(labeled("Value", dataValue))
+        arrangeStack.addArrangedSubview(labeled("X", xField))
+        arrangeStack.addArrangedSubview(labeled("Y", yField))
+        arrangeStack.addArrangedSubview(labeled("W", wField))
+        arrangeStack.addArrangedSubview(labeled("H", hField))
+        arrangeStack.addArrangedSubview(labeled("Angle", angleField))
+
+        let stack = NSStackView()
+        configure(stack)
+        stack.edgeInsets = NSEdgeInsets(top: 12, left: 10, bottom: 12, right: 10)
+        stack.spacing = 10
+        stack.addArrangedSubview(diagramStack)
+        stack.addArrangedSubview(tabRow)
+        stack.addArrangedSubview(styleStack)
+        stack.addArrangedSubview(textStack)
+        stack.addArrangedSubview(arrangeStack)
+
         let scroll = NSScrollView()
-        scroll.drawsBackground = false
+        scroll.drawsBackground = true
+        scroll.backgroundColor = .white
         scroll.hasVerticalScroller = true
+        scroll.scrollerStyle = .overlay
         scroll.translatesAutoresizingMaskIntoConstraints = false
         let document = NSView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(stack)
         scroll.documentView = document
+
+        let border = NSView()
+        border.wantsLayer = true
+        border.layer?.backgroundColor = DrawioPane.line.cgColor
+        border.translatesAutoresizingMaskIntoConstraints = false
+
         addSubview(scroll)
+        addSubview(border)
         NSLayoutConstraint.activate([
             scroll.leadingAnchor.constraint(equalTo: leadingAnchor),
             scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -286,16 +453,22 @@ final class FormatPane: NSView {
             stack.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             stack.topAnchor.constraint(equalTo: document.topAnchor),
             stack.bottomAnchor.constraint(equalTo: document.bottomAnchor),
-            document.widthAnchor.constraint(equalTo: scroll.widthAnchor)
+            document.widthAnchor.constraint(equalTo: scroll.widthAnchor),
+            border.leadingAnchor.constraint(equalTo: leadingAnchor),
+            border.topAnchor.constraint(equalTo: topAnchor),
+            border.bottomAnchor.constraint(equalTo: bottomAnchor),
+            border.widthAnchor.constraint(equalToConstant: 1)
         ])
+        applyMode(hasShape: false)
     }
 
     required init?(coder: NSCoder) { nil }
 
     func show(shape: ShapeNode?) {
+        let same = shape?.id != nil && shape?.id == shapeID
+        if shape != nil && !same { formatTab = 0 }
         shapeID = shape?.id
-        let enabled = shape != nil
-        [xField, yField, wField, hField, angleField, fillWell, lineWell, fontWell, weight, pattern, endArrow, fontName, fontSize, dataLabel, dataValue].forEach { ($0 as? NSControl)?.isEnabled = enabled }
+        applyMode(hasShape: shape != nil)
         guard let shape else {
             [xField, yField, wField, hField, angleField].forEach { $0.stringValue = "" }
             return
@@ -321,6 +494,35 @@ final class FormatPane: NSView {
             dataValue.stringValue = ""
         }
     }
+
+    private func applyMode(hasShape: Bool) {
+        diagramStack.isHidden = hasShape
+        tabRow.isHidden = !hasShape
+        guard hasShape else {
+            styleStack.isHidden = true
+            textStack.isHidden = true
+            arrangeStack.isHidden = true
+            return
+        }
+        showFormatTab(formatTab)
+    }
+
+    private func showFormatTab(_ index: Int) {
+        formatTab = max(0, min(2, index))
+        styleStack.isHidden = formatTab != 0
+        textStack.isHidden = formatTab != 1
+        arrangeStack.isHidden = formatTab != 2
+        for (buttonIndex, button) in tabButtons.enumerated() {
+            button.chosen = buttonIndex == formatTab
+        }
+    }
+
+    @objc private func selectFormatTab(_ sender: NSButton) {
+        showFormatTab(sender.tag)
+    }
+
+    @objc private func gridClicked() { onToggleGrid?(gridCheck.state == .on) }
+    @objc private func pointsClicked() { onToggleConnectionPoints?(pointsCheck.state == .on) }
 
     @objc private func commitPosition() {
         onChange?(.position(
@@ -356,37 +558,93 @@ final class FormatPane: NSView {
         onChange?(.shapeData(label: dataLabel.stringValue, value: dataValue.stringValue))
     }
 
+    private func configure(_ stack: NSStackView) {
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+    }
+
     private func section(_ title: String) -> NSTextField {
-        let label = NSTextField(labelWithString: title.uppercased())
-        label.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        label.textColor = StudioChrome.accent
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: 12, weight: .bold)
+        label.textColor = .black
         return label
+    }
+
+    private func bodyLabel(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = .black
+        return label
+    }
+
+    private func option(_ title: String, on: Bool) -> NSButton {
+        let button = NSButton(checkboxWithTitle: title, target: nil, action: nil)
+        button.font = NSFont.systemFont(ofSize: 12)
+        button.state = on ? .on : .off
+        return button
     }
 
     private func labeled(_ title: String, _ control: NSView) -> NSView {
         let label = NSTextField(labelWithString: title)
-        label.font = NSFont.systemFont(ofSize: 11)
-        label.textColor = StudioChrome.label
+        label.font = NSFont.systemFont(ofSize: 12)
+        label.textColor = .black
+        label.translatesAutoresizingMaskIntoConstraints = false
         label.widthAnchor.constraint(equalToConstant: 52).isActive = true
         control.translatesAutoresizingMaskIntoConstraints = false
         if control is NSTextField || control is NSPopUpButton {
-            control.widthAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+            let width = control.widthAnchor.constraint(equalToConstant: 136)
+            width.priority = .defaultHigh
+            width.isActive = true
         }
         let row = NSStackView(views: [label, control])
         row.orientation = .horizontal
         row.alignment = .centerY
+        row.spacing = 6
         return row
     }
+}
 
-    private func grid(_ rows: [(String, NSTextField)]) -> NSView {
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.spacing = 4
-        stack.alignment = .leading
-        for (title, field) in rows {
-            field.placeholderString = title
-            stack.addArrangedSubview(labeled(title, field))
+private final class FillButton: NSButton {
+    var fill: NSColor = .clear
+    override var wantsUpdateLayer: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let path = NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4)
+        fill.setFill()
+        path.fill()
+        let font = NSFont.systemFont(ofSize: 14, weight: .semibold)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: NSColor.black
+        ]
+        let text = title as NSString
+        let size = text.size(withAttributes: attrs)
+        let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
+        text.draw(at: origin, withAttributes: attrs)
+    }
+}
+
+private final class TextTabButton: NSButton {
+    var chosen = false {
+        didSet { needsDisplay = true }
+    }
+
+    override var wantsUpdateLayer: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let font = NSFont.systemFont(ofSize: 12, weight: chosen ? .bold : .regular)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: chosen ? NSColor.black : NSColor(white: 0.35, alpha: 1)
+        ]
+        let text = title as NSString
+        let size = text.size(withAttributes: attrs)
+        let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
+        text.draw(at: origin, withAttributes: attrs)
+        if chosen {
+            NSColor.black.setFill()
+            NSRect(x: 6, y: 1, width: max(0, bounds.width - 12), height: 2).fill()
         }
-        return stack
     }
 }

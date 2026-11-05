@@ -92,6 +92,55 @@ enum SelfTest {
         windowController.selection = [shapeID]
         windowController.window?.setFrame(NSRect(x: 80, y: 80, width: 1280, height: 820), display: true)
         windowController.window?.layoutIfNeeded()
+        if let content = windowController.window?.contentView {
+            if let ribbonBar = first(RibbonBar.self, in: content) {
+                check(abs(ribbonBar.frame.height - 102) < 0.5, "ribbon height is 102, got \(ribbonBar.frame.height)")
+            } else {
+                check(false, "window has a ribbon")
+            }
+            if let shapes = first(ShapesPane.self, in: content) {
+                check(abs(shapes.frame.width - 232) < 4, "shapes pane width is 232, got \(shapes.frame.width)")
+                let search = first(NSSearchField.self, in: shapes)
+                check(search?.placeholderString == "Type / to search", "shape search placeholder")
+                let more = all(NSButton.self, in: shapes).contains { $0.title == "+ More Shapes" }
+                check(more, "shapes pane has + More Shapes")
+            } else {
+                check(false, "window has a shapes pane")
+            }
+            if let clip = find(identifier: "formatClip", in: content) {
+                check(!clip.isHidden, "format pane starts visible")
+                check(abs(clip.frame.width - 240) < 8, "format pane width is 240, got \(clip.frame.width)")
+            } else {
+                check(false, "window has a format pane")
+            }
+            if let format = first(FormatPane.self, in: content) {
+                let titles = all(NSButton.self, in: format).map(\.title)
+                check(titles.contains("Style") && titles.contains("Text") && titles.contains("Arrange"), "format pane has Style, Text, and Arrange")
+                check(titles.contains("Grid") && titles.contains("Connection Arrows") && titles.contains("Connection Points") && titles.contains("Guides"), "diagram format options")
+                let labels = all(NSTextField.self, in: format).map(\.stringValue)
+                check(labels.contains("10 pt"), "grid size label is 10 pt")
+                check(labels.contains("Page View"), "page view note")
+            }
+            if let page = find(identifier: "pageBar", in: content) {
+                check(abs(page.frame.height - 32) < 0.5, "page bar height is 32, got \(page.frame.height)")
+                check(abs(page.frame.minY) < 1, "page bar is the bottom edge, minY \(page.frame.minY)")
+            } else {
+                check(false, "window has a page bar")
+            }
+            let rulers = all(RulerView.self, in: content)
+            check(rulers.count == 2, "ruler views stay available, count \(rulers.count)")
+            check(rulers.allSatisfy { $0.isHidden && ($0.frame.width < 1 || $0.frame.height < 1) }, "rulers are hidden and take no space")
+        }
+        check(windowController.formatVisible, "formatVisible defaults to true")
+        windowController.toggleFormat(nil)
+        windowController.window?.layoutIfNeeded()
+        if let content = windowController.window?.contentView, let clip = find(identifier: "formatClip", in: content) {
+            check(!windowController.formatVisible, "toggleFormat hides format")
+            check(clip.isHidden || clip.frame.width < 1, "hidden format width is 0, got \(clip.frame.width)")
+        }
+        windowController.toggleFormat(nil)
+        windowController.window?.layoutIfNeeded()
+        check(windowController.formatVisible, "toggleFormat shows format again")
         for tab in 0..<4 {
             windowController.showRibbonTabForTest(tab)
             windowController.writeGUISnapshot(to: URL(fileURLWithPath: "/tmp/vsdx-gui-\(tab).png"))
@@ -187,6 +236,32 @@ enum SelfTest {
 
         try? FileManager.default.removeItem(at: url)
         return finish(failures)
+    }
+
+    private static func first<T: NSView>(_ type: T.Type, in root: NSView) -> T? {
+        if let match = root as? T { return match }
+        for child in root.subviews {
+            if let match = first(type, in: child) { return match }
+        }
+        return nil
+    }
+
+    private static func all<T: NSView>(_ type: T.Type, in root: NSView) -> [T] {
+        var found: [T] = []
+        func walk(_ view: NSView) {
+            if let match = view as? T { found.append(match) }
+            for child in view.subviews { walk(child) }
+        }
+        walk(root)
+        return found
+    }
+
+    private static func find(identifier: String, in root: NSView) -> NSView? {
+        if root.identifier?.rawValue == identifier { return root }
+        for child in root.subviews {
+            if let match = find(identifier: identifier, in: child) { return match }
+        }
+        return nil
     }
 
     private static func finish(_ failures: [String]) -> Int32 {

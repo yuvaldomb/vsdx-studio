@@ -1,22 +1,33 @@
 import AppKit
 import VSDXCore
 
+private enum DrawioChrome {
+    static let background = NSColor(srgbRed: 241.0 / 255, green: 243.0 / 255, blue: 244.0 / 255, alpha: 1)
+    static let line = NSColor(srgbRed: 218.0 / 255, green: 218.0 / 255, blue: 218.0 / 255, alpha: 1)
+    static let pageFill = NSColor(srgbRed: 225.0 / 255, green: 233.0 / 255, blue: 247.0 / 255, alpha: 1)
+    static let pageText = NSColor(srgbRed: 11.0 / 255, green: 87.0 / 255, blue: 208.0 / 255, alpha: 1)
+}
+
 final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDelegate, NSTextFieldDelegate {
     private let studioDocument: StudioDocument
     private let ribbon = RibbonBar()
     private let shapesPane = ShapesPane()
     private let formatPane = FormatPane()
+    private let formatClip = NSView()
     private let canvas = CanvasView()
     private let scroll = NSScrollView()
     private let split = NSSplitView()
     private let hRuler = RulerView(horizontal: true)
     private let vRuler = RulerView(horizontal: false)
+    private let rulerCorner = NSView()
     private let pageBar = NSStackView()
-    private let status = NSTextField(labelWithString: "Ready")
-    private let zoomLabel = NSTextField(labelWithString: "100%")
     private static var nextCascade = NSPoint.zero
     private var snapshot: Diagram?
-    private var showRulers = true
+    private var showRulers = false
+    private var hRulerHeight: NSLayoutConstraint!
+    private var vRulerWidth: NSLayoutConstraint!
+    private var formatClipWidth: NSLayoutConstraint!
+    private(set) var formatVisible = true
 
     var pageIndex = 0
     var selection: [Int] = [] {
@@ -36,17 +47,24 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
     var zoom: CGFloat = 1 {
         didSet {
             canvas.zoom = zoom
-            zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"
             canvas.updateFrame()
             syncRulers()
         }
     }
     var snapEnabled = true
     var showGrid = true {
-        didSet { canvas.showGrid = showGrid; canvas.needsDisplay = true }
+        didSet {
+            canvas.showGrid = showGrid
+            canvas.needsDisplay = true
+            formatPane.showsGrid = showGrid
+        }
     }
     var showConnections = false {
-        didSet { canvas.showConnections = showConnections; canvas.needsDisplay = true }
+        didSet {
+            canvas.showConnections = showConnections
+            canvas.needsDisplay = true
+            formatPane.showsConnectionPoints = showConnections
+        }
     }
     var diagram: Diagram { studioDocument.diagram }
 
@@ -61,6 +79,7 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         window.minSize = NSSize(width: 980, height: 640)
         window.title = "Drawing.vsdx"
         window.titleVisibility = .visible
+        window.backgroundColor = DrawioChrome.background
         window.appearance = NSAppearance(named: .aqua)
         super.init(window: window)
         window.delegate = self
@@ -70,6 +89,14 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         ribbon.update(tool: .pointer)
         shapesPane.onPlace = { [weak self] id in self?.placeShapeForTest(id) }
         formatPane.onChange = { [weak self] change in self?.apply(change) }
+        formatPane.onToggleGrid = { [weak self] on in
+            guard let self, self.showGrid != on else { return }
+            self.toggleGrid(nil)
+        }
+        formatPane.onToggleConnectionPoints = { [weak self] on in
+            guard let self, self.showConnections != on else { return }
+            self.toggleConnections(nil)
+        }
         syncFromDocument(rebuildPanels: true)
         let screen = NSScreen.screens.first { $0.frame.contains(NSEvent.mouseLocation) } ?? NSScreen.main ?? NSScreen.screens.first
         if let screen {
@@ -88,6 +115,8 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
 
     private func build() {
         guard let content = window?.contentView else { return }
+        content.wantsLayer = true
+        content.layer?.backgroundColor = DrawioChrome.background.cgColor
         ribbon.translatesAutoresizingMaskIntoConstraints = false
         shapesPane.translatesAutoresizingMaskIntoConstraints = false
         formatPane.translatesAutoresizingMaskIntoConstraints = false
@@ -102,57 +131,82 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
 
         hRuler.translatesAutoresizingMaskIntoConstraints = false
         vRuler.translatesAutoresizingMaskIntoConstraints = false
-        let corner = NSView()
-        corner.wantsLayer = true
-        corner.layer?.backgroundColor = NSColor.white.cgColor
-        corner.translatesAutoresizingMaskIntoConstraints = false
+        rulerCorner.wantsLayer = true
+        rulerCorner.layer?.backgroundColor = NSColor.white.cgColor
+        rulerCorner.translatesAutoresizingMaskIntoConstraints = false
+        hRuler.isHidden = true
+        vRuler.isHidden = true
+        rulerCorner.isHidden = true
 
-        let canvasColumn = NSGridView(views: [
-            [corner, hRuler],
-            [vRuler, scroll]
-        ])
-        canvasColumn.rowSpacing = 0
-        canvasColumn.columnSpacing = 0
+        let canvasColumn = NSView()
         canvasColumn.translatesAutoresizingMaskIntoConstraints = false
-        corner.widthAnchor.constraint(equalToConstant: 24).isActive = true
-        corner.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        hRuler.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        vRuler.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        canvasColumn.addSubview(scroll)
+        canvasColumn.addSubview(hRuler)
+        canvasColumn.addSubview(vRuler)
+        canvasColumn.addSubview(rulerCorner)
+        hRulerHeight = hRuler.heightAnchor.constraint(equalToConstant: 0)
+        vRulerWidth = vRuler.widthAnchor.constraint(equalToConstant: 0)
+        NSLayoutConstraint.activate([
+            rulerCorner.leadingAnchor.constraint(equalTo: canvasColumn.leadingAnchor),
+            rulerCorner.topAnchor.constraint(equalTo: canvasColumn.topAnchor),
+            rulerCorner.widthAnchor.constraint(equalTo: vRuler.widthAnchor),
+            rulerCorner.heightAnchor.constraint(equalTo: hRuler.heightAnchor),
+            hRuler.leadingAnchor.constraint(equalTo: rulerCorner.trailingAnchor),
+            hRuler.trailingAnchor.constraint(equalTo: canvasColumn.trailingAnchor),
+            hRuler.topAnchor.constraint(equalTo: canvasColumn.topAnchor),
+            hRulerHeight,
+            vRuler.leadingAnchor.constraint(equalTo: canvasColumn.leadingAnchor),
+            vRuler.topAnchor.constraint(equalTo: rulerCorner.bottomAnchor),
+            vRuler.bottomAnchor.constraint(equalTo: canvasColumn.bottomAnchor),
+            vRulerWidth,
+            scroll.leadingAnchor.constraint(equalTo: vRuler.trailingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: canvasColumn.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: hRuler.bottomAnchor),
+            scroll.bottomAnchor.constraint(equalTo: canvasColumn.bottomAnchor)
+        ])
 
         pageBar.orientation = .horizontal
-        pageBar.spacing = 4
-        pageBar.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        pageBar.alignment = .centerY
+        pageBar.spacing = 2
+        pageBar.edgeInsets = NSEdgeInsets(top: 0, left: 8, bottom: 0, right: 8)
         pageBar.translatesAutoresizingMaskIntoConstraints = false
         let pageWrap = NSView()
+        pageWrap.identifier = NSUserInterfaceItemIdentifier("pageBar")
         pageWrap.wantsLayer = true
-        pageWrap.layer?.backgroundColor = NSColor.white.cgColor
+        pageWrap.layer?.backgroundColor = DrawioChrome.background.cgColor
         pageWrap.translatesAutoresizingMaskIntoConstraints = false
+        let pageLine = NSView()
+        pageLine.wantsLayer = true
+        pageLine.layer?.backgroundColor = DrawioChrome.line.cgColor
+        pageLine.translatesAutoresizingMaskIntoConstraints = false
+        pageWrap.addSubview(pageLine)
         pageWrap.addSubview(pageBar)
         NSLayoutConstraint.activate([
+            pageLine.leadingAnchor.constraint(equalTo: pageWrap.leadingAnchor),
+            pageLine.trailingAnchor.constraint(equalTo: pageWrap.trailingAnchor),
+            pageLine.topAnchor.constraint(equalTo: pageWrap.topAnchor),
+            pageLine.heightAnchor.constraint(equalToConstant: 1),
             pageBar.leadingAnchor.constraint(equalTo: pageWrap.leadingAnchor),
             pageBar.trailingAnchor.constraint(lessThanOrEqualTo: pageWrap.trailingAnchor),
-            pageBar.topAnchor.constraint(equalTo: pageWrap.topAnchor),
+            pageBar.topAnchor.constraint(equalTo: pageLine.bottomAnchor),
             pageBar.bottomAnchor.constraint(equalTo: pageWrap.bottomAnchor),
             pageWrap.heightAnchor.constraint(equalToConstant: 32)
         ])
 
-        status.font = NSFont.systemFont(ofSize: 11)
-        status.textColor = StudioChrome.label
-        zoomLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .medium)
-        let statusBar = NSStackView(views: [status, NSView(), zoomLabel])
-        statusBar.edgeInsets = NSEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
-        statusBar.translatesAutoresizingMaskIntoConstraints = false
-        let statusWrap = NSView()
-        statusWrap.wantsLayer = true
-        statusWrap.layer?.backgroundColor = NSColor.white.cgColor
-        statusWrap.translatesAutoresizingMaskIntoConstraints = false
-        statusWrap.addSubview(statusBar)
+        formatClip.identifier = NSUserInterfaceItemIdentifier("formatClip")
+        formatClip.wantsLayer = true
+        formatClip.layer?.backgroundColor = NSColor.white.cgColor
+        formatClip.layer?.masksToBounds = true
+        formatClip.clipsToBounds = true
+        formatClip.translatesAutoresizingMaskIntoConstraints = false
+        formatClip.addSubview(formatPane)
+        formatClipWidth = formatClip.widthAnchor.constraint(equalToConstant: 240)
         NSLayoutConstraint.activate([
-            statusBar.leadingAnchor.constraint(equalTo: statusWrap.leadingAnchor),
-            statusBar.trailingAnchor.constraint(equalTo: statusWrap.trailingAnchor),
-            statusBar.topAnchor.constraint(equalTo: statusWrap.topAnchor),
-            statusBar.bottomAnchor.constraint(equalTo: statusWrap.bottomAnchor),
-            statusWrap.heightAnchor.constraint(equalToConstant: 22)
+            formatClipWidth,
+            formatPane.leadingAnchor.constraint(equalTo: formatClip.leadingAnchor),
+            formatPane.topAnchor.constraint(equalTo: formatClip.topAnchor),
+            formatPane.bottomAnchor.constraint(equalTo: formatClip.bottomAnchor),
+            formatPane.widthAnchor.constraint(equalToConstant: 240)
         ])
 
         split.isVertical = true
@@ -160,11 +214,11 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         split.translatesAutoresizingMaskIntoConstraints = false
         split.addArrangedSubview(shapesPane)
         split.addArrangedSubview(canvasColumn)
-        split.addArrangedSubview(formatPane)
-        shapesPane.widthAnchor.constraint(equalToConstant: 230).isActive = true
-        formatPane.widthAnchor.constraint(equalToConstant: 270).isActive = true
+        split.addArrangedSubview(formatClip)
+        shapesPane.widthAnchor.constraint(equalToConstant: 232).isActive = true
         scroll.widthAnchor.constraint(greaterThanOrEqualToConstant: 360).isActive = true
         canvasColumn.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        canvasColumn.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         scroll.setContentHuggingPriority(.defaultLow, for: .horizontal)
         split.setHoldingPriority(NSLayoutConstraint.Priority(260), forSubviewAt: 0)
         split.setHoldingPriority(NSLayoutConstraint.Priority(50), forSubviewAt: 1)
@@ -173,22 +227,18 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         content.addSubview(ribbon)
         content.addSubview(split)
         content.addSubview(pageWrap)
-        content.addSubview(statusWrap)
         NSLayoutConstraint.activate([
             ribbon.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             ribbon.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             ribbon.topAnchor.constraint(equalTo: content.topAnchor),
-            ribbon.heightAnchor.constraint(equalToConstant: 128),
+            ribbon.heightAnchor.constraint(equalToConstant: 102),
             split.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             split.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             split.topAnchor.constraint(equalTo: ribbon.bottomAnchor),
             split.bottomAnchor.constraint(equalTo: pageWrap.topAnchor),
             pageWrap.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             pageWrap.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            pageWrap.bottomAnchor.constraint(equalTo: statusWrap.topAnchor),
-            statusWrap.leadingAnchor.constraint(equalTo: content.leadingAnchor),
-            statusWrap.trailingAnchor.constraint(equalTo: content.trailingAnchor),
-            statusWrap.bottomAnchor.constraint(equalTo: content.bottomAnchor)
+            pageWrap.bottomAnchor.constraint(equalTo: content.bottomAnchor)
         ])
         layoutSplit()
     }
@@ -196,8 +246,25 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
     private func layoutSplit() {
         let width = split.bounds.width
         guard width > 700 else { return }
-        split.setPosition(230, ofDividerAt: 0)
-        split.setPosition(width - 270, ofDividerAt: 1)
+        let format: CGFloat = formatVisible ? 240 : 0
+        split.setPosition(232, ofDividerAt: 0)
+        split.setPosition(width - format, ofDividerAt: 1)
+    }
+
+    private func applyFormatVisibility() {
+        formatClipWidth.constant = formatVisible ? 240 : 0
+        formatClip.isHidden = !formatVisible
+        split.layoutSubtreeIfNeeded()
+        layoutSplit()
+    }
+
+    private func applyRulers() {
+        hRuler.isHidden = !showRulers
+        vRuler.isHidden = !showRulers
+        rulerCorner.isHidden = !showRulers
+        hRulerHeight.constant = showRulers ? 24 : 0
+        vRulerWidth.constant = showRulers ? 24 : 0
+        if showRulers { syncRulers() }
     }
 
     func windowDidResize(_ notification: Notification) {
@@ -218,27 +285,42 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         rebuildPageBar()
         if rebuildPanels { showFormat() }
         syncRulers()
-        status.stringValue = "\(page.name)    \(inchesString(page.width)) in × \(inchesString(page.height)) in"
     }
 
     private func showFormat() {
         let shape = selection.last.flatMap { diagram.pages[pageIndex].shape(id: $0) }
+        formatPane.showsGrid = showGrid
+        formatPane.showsConnectionPoints = showConnections
         formatPane.show(shape: shape)
     }
 
     private func rebuildPageBar() {
         pageBar.arrangedSubviews.forEach { $0.removeFromSuperview() }
         for (index, page) in diagram.pages.enumerated() {
-            let button = NSButton(title: page.name, target: self, action: #selector(selectPage(_:)))
-            button.tag = index
-            button.bezelStyle = .recessed
-            button.state = index == pageIndex ? .on : .off
-            button.font = NSFont.systemFont(ofSize: 12, weight: index == pageIndex ? .semibold : .regular)
-            pageBar.addArrangedSubview(button)
+            pageBar.addArrangedSubview(pageTab(title: page.name, tag: index, selected: index == pageIndex, action: #selector(selectPage(_:))))
         }
-        let add = NSButton(title: "+", target: self, action: #selector(addPage(_:)))
-        add.bezelStyle = .recessed
-        pageBar.addArrangedSubview(add)
+        pageBar.addArrangedSubview(pageTab(title: "+", tag: 0, selected: false, action: #selector(addPage(_:))))
+    }
+
+    private func pageTab(title: String, tag: Int, selected: Bool, action: Selector) -> NSButton {
+        let button = PageTabButton()
+        button.target = self
+        button.action = action
+        button.tag = tag
+        button.title = title
+        button.isBordered = false
+        button.wantsLayer = true
+        button.focusRingType = .none
+        button.filled = selected
+        button.fillColor = DrawioChrome.pageFill
+        button.titleColor = selected ? DrawioChrome.pageText : NSColor.black
+        let font = NSFont.systemFont(ofSize: 13, weight: selected ? .medium : .regular)
+        button.font = font
+        let textWidth = (title as NSString).size(withAttributes: [.font: font]).width
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: max(28, ceil(textWidth) + 16)).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        return button
     }
 
     @objc private func scrollChanged() { syncRulers() }
@@ -273,9 +355,8 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         self.snapshot = nil
     }
     func statusPoint(_ point: CGPoint?) {
-        guard let point else { return }
+        guard let point, showRulers else { return }
         let page = diagram.pages[pageIndex]
-        status.stringValue = String(format: "%@    X: %.2f in    Y: %.2f in    %.0f%%", page.name, point.x, point.y, zoom * 100)
         hRuler.marker = 48 - scroll.contentView.bounds.origin.x + point.x * canvas.pixelsPerInch
         let pageBottom = 48 + CGFloat(page.height) * canvas.pixelsPerInch
         vRuler.marker = pageBottom - scroll.contentView.bounds.origin.y - point.y * canvas.pixelsPerInch
@@ -558,19 +639,31 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
     @objc func zoomActual(_ sender: Any?) { zoom = 1 }
     @objc func zoomFit(_ sender: Any?) {
         let visible = scroll.contentView.bounds.size
-        let fit = min((visible.width - 80) / CGFloat(currentPage().width) / 72, (visible.height - 80) / CGFloat(currentPage().height) / 72)
+        let unit = canvas.pixelsPerInch / max(canvas.zoom, 0.001)
+        let page = currentPage()
+        guard page.width > 0, page.height > 0, unit > 0 else { return }
+        let fit = min(
+            (visible.width - 80) / CGFloat(page.width) / unit,
+            (visible.height - 80) / CGFloat(page.height) / unit
+        )
         zoom = min(4, max(0.15, fit))
     }
     @objc func toggleGrid(_ sender: Any?) { showGrid.toggle() }
     @objc func toggleRulers(_ sender: Any?) {
         showRulers.toggle()
-        hRuler.isHidden = !showRulers
-        vRuler.isHidden = !showRulers
+        applyRulers()
+    }
+    func toggleFormat() {
+        formatVisible.toggle()
+        applyFormatVisibility()
+    }
+
+    @objc func toggleFormat(_ sender: Any?) {
+        toggleFormat()
     }
     @objc func toggleSnap(_ sender: Any?) {
         snapEnabled.toggle()
         canvas.snapEnabled = snapEnabled
-        status.stringValue = snapEnabled ? "Snap is on" : "Snap is off"
     }
     @objc func toggleConnections(_ sender: Any?) { showConnections.toggle() }
 
@@ -659,6 +752,30 @@ final class StudioWindowController: NSWindowController, CanvasHost, NSWindowDele
         }
     }
 
+}
+
+private final class PageTabButton: NSButton {
+    var filled = false
+    var fillColor: NSColor = .clear
+    var titleColor: NSColor = .black
+
+    override var wantsUpdateLayer: Bool { false }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if filled {
+            fillColor.setFill()
+            NSBezierPath(roundedRect: bounds, xRadius: 4, yRadius: 4).fill()
+        }
+        let font = self.font ?? NSFont.systemFont(ofSize: 13)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: titleColor
+        ]
+        let text = title as NSString
+        let size = text.size(withAttributes: attributes)
+        let origin = NSPoint(x: (bounds.width - size.width) / 2, y: (bounds.height - size.height) / 2)
+        text.draw(at: origin, withAttributes: attributes)
+    }
 }
 
 final class RulerView: NSView {
